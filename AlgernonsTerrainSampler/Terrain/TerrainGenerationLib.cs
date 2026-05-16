@@ -58,7 +58,7 @@ public static class TerrainGenerationLib
         int chunkSize,
         int mapSizeY)
     {
-        float oceanicityFactor = mapSizeY / 256f * (1f / 3f);
+        float oceanicityFactor = (float)(mapSizeY / 256) * 0.33333f;
         float chunkBlockDelta = 1.0f / chunkSize;
         return oceanicityFactor * oceanMapCorners.BiLerp(
             blockColumnInChunkCoordinate.X * chunkBlockDelta,
