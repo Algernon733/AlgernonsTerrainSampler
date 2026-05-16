@@ -31,6 +31,44 @@ public class TerrainSamplerCommand(TerrainSamplerMod mod)
         }
     }
 
+    public TextCommandResult CmdSampleColumn(TextCommandCallingArgs args)
+    {
+        EntityPos playerPosition = args.Caller.Player.Entity.Pos;
+
+        int x = (int)playerPosition.X;
+        int z = (int)playerPosition.Z;
+
+        TerrainSamplerGenTerra genTerra = mod.GenTerra;
+        if (genTerra == null)
+            return TextCommandResult.Error("TerrainSamplerGenTerra is not initialized.");
+
+        try
+        {
+            TerrainColumnSample sample = mod.SampleColumn(x, z);
+
+            int climateR = (sample.ClimateColor >> 16) & 0xFF;
+            int climateG = (sample.ClimateColor >> 8) & 0xFF;
+            int climateB = sample.ClimateColor & 0xFF;
+
+            int worldHeight = genTerra.MapSizeY;
+
+            StringBuilder sb = new();
+            _ = sb.AppendLine($"Terrain column sample at (X={x}, Z={z}):")
+                .AppendLine($"  Height: {sample.Height}/{worldHeight}")
+                .AppendLine($"  ClimateColor: 0x{sample.ClimateColor:X8} (R/raw temperature:{climateR}, G/raw rainfall:{climateG}, B/raw geo activity:{climateB})")
+                .AppendLine($"  Temperature: {sample.Temperature:F4}/1")
+                .AppendLine($"  Rainfall: {sample.Rainfall:F4}/1")
+                .AppendLine($"  ForestDensity: {sample.ForestDensity:F4}/1")
+                .AppendLine($"  ShrubDensity: {sample.ShrubDensity:F4}/1");
+
+            return TextCommandResult.Success(sb.ToString());
+        }
+        catch (Exception ex)
+        {
+            return TextCommandResult.Error($"Failed to sample terrain column at ({x}, {z}): {ex.Message}");
+        }
+    }
+
 #if DEBUG
     public TextCommandResult CmdBlockColumnTerrainHeightInfo(TextCommandCallingArgs args)
     {

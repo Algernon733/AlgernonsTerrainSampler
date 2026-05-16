@@ -53,6 +53,11 @@ public class TerrainSamplerMod : ModSystem
                 .RequiresPrivilege(Privilege.chat)
                 .HandleWith(command.CmdColumnHeight)
             .EndSubCommand()
+            .BeginSubCommand("samplecolumn")
+                .WithDescription("Get a detailed terrain column sample at your current position")
+                .RequiresPrivilege(Privilege.chat)
+                .HandleWith(command.CmdSampleColumn)
+            .EndSubCommand()
 #if DEBUG
             .BeginSubCommand("columninfo")
                 .WithDescription("Get debug information about the terrain generation that went into generating the block column at your current position")
