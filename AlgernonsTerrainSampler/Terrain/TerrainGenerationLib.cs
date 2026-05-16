@@ -267,6 +267,27 @@ public static class TerrainGenerationLib
         return heightAdjustedRainfall / 255f;
     }
 
+    public static int SampleClimateColor(
+        BlockInChunkMapCoordinate blockColumnInChunkCoordinate,
+        TerrainGenerationContext context,
+        int chunkSize,
+        WorldMapCoordinate worldCoordinate,
+        SimplexNoise distort2dOnAxisX,
+        SimplexNoise distort2dOnAxisZ)
+    {
+        if (context.ClimateMapCorners.IsEmpty)
+            return 0;
+
+        double distortionForPosX = distort2dOnAxisX.Noise(worldCoordinate.X, worldCoordinate.Z);
+        double distortionForPosZ = distort2dOnAxisZ.Noise(worldCoordinate.X, worldCoordinate.Z);
+
+        float chunkBlockDelta = 1.0f / chunkSize;
+        float distortedX = (blockColumnInChunkCoordinate.X * chunkBlockDelta) + ((float)distortionForPosX / chunkSize);
+        float distortedZ = (blockColumnInChunkCoordinate.Z * chunkBlockDelta) + ((float)distortionForPosZ / chunkSize);
+
+        return context.ClimateMapCorners.BiLerpRgbColor(distortedX, distortedZ);
+    }
+
     public static int ApplySeaLevelRiseAdjustment(int baseHeight, float rainfall, int seaLevel)
     {
         if (baseHeight < seaLevel)

@@ -33,9 +33,9 @@
   <PropertyGroup>
     <ModName>Algernons Terrain Sampler</ModName>
     <GameVersion>1.22.0</GameVersion>
-    <ModVersion>1.2.1</ModVersion>
+    <ModVersion>1.2.2</ModVersion>
     <ModId>algernonsterrainsampler</ModId>
-    <Description>Provides terrain height sampling at any world coordinate without full chunk generation.</Description>
+    <Description>Provides terrain height and worldgen map-data sampling at any world coordinate without full chunk generation.</Description>
     <Side>Universal</Side>
     <RequiredOnClient>true</RequiredOnClient>
     <RequiredOnServer>true</RequiredOnServer>

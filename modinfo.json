@@ -5,7 +5,7 @@
   "authors": [
     "Algernon"
   ],
-  "description": "Provides terrain height sampling at any world coordinate without full chunk generation.",
+  "description": "Provides terrain height and worldgen map-data sampling at any world coordinate without full chunk generation.",
   "version": "1.2.2",
   "dependencies": {
     "game": "1.22.0"

@@ -16,6 +16,7 @@ public class TerrainSamplerMod : ModSystem
     public bool WatershedsLoaded { get; private set; }
 
     private ICoreServerAPI serverAPI;
+    private bool disposed;
     private MethodInfo watershedsGetHeightMethod;
     private object watershedsGenTerraInstance;
 
@@ -107,6 +108,51 @@ public class TerrainSamplerMod : ModSystem
         }
     }
 
+    /// <summary>
+    /// Samples terrain height and worldgen map data at the specified world coordinate.
+    /// If Watersheds is loaded, its sampled terrain height is used while climate and density maps are sampled from this mod.
+    /// </summary>
+    public TerrainColumnSample SampleColumn(int worldX, int worldZ)
+        => this.SampleColumn(new WorldMapCoordinate(worldX, worldZ));
+
+    /// <inheritdoc cref="SampleColumn(int, int)"/>
+    public TerrainColumnSample SampleColumn(WorldMapCoordinate worldCoordinate)
+    {
+        if (this.GenTerra == null)
+            return new TerrainColumnSample { Height = TerraGenConfig.seaLevel };
+
+        int? heightOverride = null;
+        if (this.WatershedsLoaded && this.watershedsGetHeightMethod != null && this.watershedsGenTerraInstance != null)
+        {
+            try
+            {
+                Type watershedsCoordinateType = this.watershedsGetHeightMethod.GetParameters()[0].ParameterType;
+                object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
+                object result = this.watershedsGetHeightMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
+                heightOverride = (int)result;
+            }
+            catch (Exception ex)
+            {
+                // Disable to avoid log spam
+                this.WatershedsLoaded = false;
+
+                this.serverAPI.Logger.Warning(
+                    "AlgernonsTerrainSampler: Watersheds height sample failed. Falling back to use the normal sampler. " +
+                    "Your terrain samples may be inconsistent with the actual terrain. {0}",
+                    ex);
+            }
+        }
+
+        try
+        {
+            return this.GenTerra.SampleColumn(worldCoordinate, heightOverride);
+        }
+        catch (Exception)
+        {
+            return new TerrainColumnSample { Height = heightOverride ?? TerraGenConfig.seaLevel };
+        }
+    }
+
     private void TryReflectWatersheds()
     {
         const string typeName = "Watersheds.WorldGen.Terrain.WatershedsGenTerra";
@@ -147,7 +193,16 @@ public class TerrainSamplerMod : ModSystem
 
     public override void Dispose()
     {
+        if (this.disposed)
+            return;
+
+        this.disposed = true;
         Instance = null;
+        this.serverAPI = null;
+        this.GenTerra = null;
+        this.watershedsGetHeightMethod = null;
+        this.watershedsGenTerraInstance = null;
+        this.WatershedsLoaded = false;
         Mapping.ThreadSafeRegionCache.Dispose();
         Terrain.TerrainGenerationLib.DisposeContextCache();
         base.Dispose();

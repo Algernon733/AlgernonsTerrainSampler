@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Threading;
 using Vintagestory.API.Common;
+using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
@@ -26,6 +27,8 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
     private ICoreServerAPI api;
 
     public ConcurrentDictionary<int, LerpedWeightedIndex2DMap> LandformMapByRegion = new();
+    private readonly ConcurrentDictionary<int, IntDataMap2D> forestMapByRegion = new();
+    private readonly ConcurrentDictionary<int, IntDataMap2D> shrubMapByRegion = new();
 
     public int RegionMapSize { get; private set; }
     public int MapSizeY => this.api.WorldManager.MapSizeY;
@@ -56,6 +59,8 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
     {
         this.LoadGlobalConfig(this.api);
         this.LandformMapByRegion.Clear();
+        this.forestMapByRegion.Clear();
+        this.shrubMapByRegion.Clear();
 
         if (GenMapsSubstitutions.NoiseLandforms.LandformsProperty == null)
             GenMapsSubstitutions.NoiseLandforms.LoadLandforms(this.api);
@@ -89,6 +94,13 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
             LerpedAmplitudes = new double[this.NumberOfOctaves],
             LerpedThresholds = new double[this.NumberOfOctaves]
         });
+    }
+
+    public override void Dispose()
+    {
+        this.TempDataThreadLocal?.Dispose();
+        this.TempDataThreadLocal = null;
+        base.Dispose();
     }
 
     public (VectorXZ terrainDistortion, float heightDistortion, float oceanDistortion) CreateDistortionEffectsForColumn(
@@ -196,5 +208,131 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
             baseHeight = ApplySeaLevelRiseAdjustment(baseHeight, rainfall, TerraGenConfig.seaLevel);
 
         return baseHeight;
+    }
+
+    public TerrainColumnSample SampleColumn(WorldMapCoordinate worldCoordinate)
+        => this.SampleColumn(worldCoordinate, null);
+
+    public TerrainColumnSample SampleColumn(WorldMapCoordinate worldCoordinate, int? heightOverride)
+    {
+        GenMaps genMaps = this.BasegameGenMaps;
+        if (genMaps?.landformsGen == null || genMaps.upheavelGen == null || genMaps.oceanGen == null || genMaps.climateGen == null)
+            throw new InvalidOperationException("Terrain generators not initialized.");
+
+        SmallChunkMapCoordinate currentChunkCoordinate = worldCoordinate.ToChunk();
+        TerrainGenerationContext context = CreateTerrainGenerationContext(this, currentChunkCoordinate, includeClimate: true);
+        BlockInChunkMapCoordinate blockColumnInChunkCoordinate = worldCoordinate.ToBlockInChunk();
+
+        int height;
+        if (heightOverride.HasValue)
+        {
+            height = heightOverride.Value;
+        }
+        else
+        {
+            (VectorXZ terrainDistortion, float heightDistortion, _) = this.CreateDistortionEffectsForColumn(
+                worldCoordinate, blockColumnInChunkCoordinate, context.UpheavalMapCorners, context.OceanMapCorners);
+
+            TerrainSamplerNormalizedSimplexFractalNoise.ColumnNoise columnNoise = this.CreateColumnNoise(
+                blockColumnInChunkCoordinate, context.TerrainOctaves, worldCoordinate, terrainDistortion);
+
+            height = CalculateColumnHeight(
+                blockColumnInChunkCoordinate, context, this.Landforms, columnNoise, heightDistortion, this.MapSizeY);
+        }
+
+        float rainfall = CalculateRainfallFromClimate(
+            blockColumnInChunkCoordinate, context, CHUNK_SIZE, height, worldCoordinate, this.Distort2dOnAxisX, this.Distort2dOnAxisZ);
+
+        if (!heightOverride.HasValue && rainfall >= 0f)
+            height = ApplySeaLevelRiseAdjustment(height, rainfall, TerraGenConfig.seaLevel);
+
+        int climateColor = SampleClimateColor(
+            blockColumnInChunkCoordinate, context, CHUNK_SIZE, worldCoordinate, this.Distort2dOnAxisX, this.Distort2dOnAxisZ);
+
+        this.SampleForestAndShrubDensity(currentChunkCoordinate, blockColumnInChunkCoordinate, out float forestDensity, out float shrubDensity);
+
+        return new TerrainColumnSample
+        {
+            Height = height,
+            ClimateColor = climateColor,
+            Rainfall = Math.Clamp(rainfall, 0f, 1f),
+            Temperature = ((climateColor >> 16) & 0xFF) / 255f,
+            ForestDensity = forestDensity,
+            ShrubDensity = shrubDensity
+        };
+    }
+
+    private void SampleForestAndShrubDensity(
+        SmallChunkMapCoordinate chunkCoordinate,
+        BlockInChunkMapCoordinate blockColumnInChunkCoordinate,
+        out float forestDensity,
+        out float shrubDensity)
+    {
+        forestDensity = 0f;
+        shrubDensity = 0f;
+
+        GenMaps genMaps = this.BasegameGenMaps;
+        if (genMaps?.climateGen == null || genMaps.forestGen == null || genMaps.bushGen == null)
+            return;
+
+        ChunkInRegionMapCoordinate chunkInRegionCoordinate = chunkCoordinate.ToChunkInRegion(this.RegionChunkSize);
+        RegionMapCoordinate regionCoordinate = chunkCoordinate.ToRegion(this.RegionChunkSize);
+
+        IntDataMap2D climateMap = ThreadSafeRegionCache.GetRegionMap(
+            regionCoordinate, this.RegionSize, 2, TerraGenConfig.climateMapScale, genMaps.climateGen, "climate");
+
+        IntDataMap2D forestMap = this.GetOrCreateClimateDerivedMap(
+            this.forestMapByRegion, regionCoordinate, climateMap, genMaps.forestGen, TerraGenConfig.forestMapScale);
+
+        IntDataMap2D shrubMap = this.GetOrCreateClimateDerivedMap(
+            this.shrubMapByRegion, regionCoordinate, climateMap, genMaps.bushGen, TerraGenConfig.shrubMapScale);
+
+        forestDensity = SampleDensityMap(forestMap, chunkInRegionCoordinate, blockColumnInChunkCoordinate);
+        shrubDensity = SampleDensityMap(shrubMap, chunkInRegionCoordinate, blockColumnInChunkCoordinate);
+    }
+
+    private IntDataMap2D GetOrCreateClimateDerivedMap(
+        ConcurrentDictionary<int, IntDataMap2D> cache,
+        RegionMapCoordinate regionCoordinate,
+        IntDataMap2D climateMap,
+        MapLayerBase generator,
+        int scale)
+    {
+        int key = (regionCoordinate.Z * this.RegionMapSize) + regionCoordinate.X;
+        return cache.GetOrAdd(key, _ =>
+        {
+            IntDataMap2D outputMap = new();
+            int size = this.RegionSize / scale;
+            outputMap.Size = size + 1;
+            outputMap.BottomRightPadding = 1;
+
+            lock (generator)
+            {
+                generator.SetInputMap(climateMap, outputMap);
+                outputMap.Data = generator.GenLayer(regionCoordinate.X * size, regionCoordinate.Z * size, size + 1, size + 1);
+            }
+
+            return outputMap;
+        });
+    }
+
+    private float SampleDensityMap(
+        IntDataMap2D map,
+        ChunkInRegionMapCoordinate chunkInRegionCoordinate,
+        BlockInChunkMapCoordinate blockColumnInChunkCoordinate)
+    {
+        float factor = (float)map.InnerSize / this.RegionChunkSize;
+        int upLeft = map.GetUnpaddedInt((int)(chunkInRegionCoordinate.X * factor), (int)(chunkInRegionCoordinate.Z * factor));
+        int upRight = map.GetUnpaddedInt((int)((chunkInRegionCoordinate.X * factor) + factor), (int)(chunkInRegionCoordinate.Z * factor));
+        int botLeft = map.GetUnpaddedInt((int)(chunkInRegionCoordinate.X * factor), (int)((chunkInRegionCoordinate.Z * factor) + factor));
+        int botRight = map.GetUnpaddedInt((int)((chunkInRegionCoordinate.X * factor) + factor), (int)((chunkInRegionCoordinate.Z * factor) + factor));
+
+        return GameMath.BiLerp(
+            upLeft,
+            upRight,
+            botLeft,
+            botRight,
+            blockColumnInChunkCoordinate.X / (float)CHUNK_SIZE,
+            blockColumnInChunkCoordinate.Z / (float)CHUNK_SIZE) / 255f;
     }
 }

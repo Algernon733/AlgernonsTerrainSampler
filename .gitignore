@@ -10,6 +10,7 @@
 *.userosscache
 *.sln.docstates
 Directory.Build.props
+deploy.ps1
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
