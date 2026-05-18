@@ -55,7 +55,7 @@ public class TerrainSamplerCommand(TerrainSamplerMod mod)
             StringBuilder sb = new();
             _ = sb.AppendLine($"Terrain column sample at (X={x}, Z={z}):")
                 .AppendLine($"  Height: {sample.Height}/{worldHeight}")
-                .AppendLine($"  ClimateColor: 0x{sample.ClimateColor:X8} (R/raw temperature:{climateR}, G/raw rainfall:{climateG}, B/raw geo activity:{climateB})")
+                .AppendLine($"  ClimateColor: 0x{sample.ClimateColor:X8} (R/raw temperature:{climateR}/255, G/raw rainfall:{climateG}/255, B/raw geo activity:{climateB}/255)")
                 .AppendLine($"  Temperature: {sample.Temperature:F4}/1")
                 .AppendLine($"  Rainfall: {sample.Rainfall:F4}/1")
                 .AppendLine($"  ForestDensity: {sample.ForestDensity:F4}/1")
