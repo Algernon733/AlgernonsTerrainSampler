@@ -18,7 +18,9 @@ public class TerrainSamplerMod : ModSystem
     private ICoreServerAPI serverAPI;
     private bool disposed;
     private MethodInfo watershedsGetHeightMethod;
+    private MethodInfo watershedsSampleColumnMethod;
     private object watershedsGenTerraInstance;
+    private WatershedsSamplerCompatability watershedsSampler;
 
     public override bool ShouldLoad(EnumAppSide side) => side == EnumAppSide.Server;
 
@@ -115,7 +117,7 @@ public class TerrainSamplerMod : ModSystem
 
     /// <summary>
     /// Samples terrain height and worldgen map data at the specified world coordinate.
-    /// If Watersheds is loaded, its sampled terrain height is used while climate and density maps are sampled from this mod.
+    /// If Watersheds is loaded, we delegate to watersheds' sampler.
     /// </summary>
     public TerrainColumnSample SampleColumn(int worldX, int worldZ)
         => this.SampleColumn(new WorldMapCoordinate(worldX, worldZ));
@@ -125,6 +127,28 @@ public class TerrainSamplerMod : ModSystem
     {
         if (this.GenTerra == null)
             return new TerrainColumnSample { Height = TerraGenConfig.seaLevel };
+
+        if (this.WatershedsLoaded && this.watershedsSampleColumnMethod != null
+            && this.watershedsGenTerraInstance != null && this.watershedsSampler != null)
+        {
+            try
+            {
+                Type watershedsCoordinateType = this.watershedsSampleColumnMethod.GetParameters()[0].ParameterType;
+                object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
+                object sampleResult = this.watershedsSampleColumnMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
+                return this.watershedsSampler.ReadSample(sampleResult);
+            }
+            catch (Exception ex)
+            {
+                this.watershedsSampleColumnMethod = null;
+                this.watershedsSampler = null;
+
+                this.serverAPI.Logger.Warning(
+                    "AlgernonsTerrainSampler: Watersheds' detailed sampler threw an exception. Falling back to just the height sampler. " +
+                    "You wont get climate, rainfall, forest opacity etc. {0}",
+                    ex);
+            }
+        }
 
         int? heightOverride = null;
         if (this.WatershedsLoaded && this.watershedsGetHeightMethod != null && this.watershedsGenTerraInstance != null)
@@ -142,7 +166,7 @@ public class TerrainSamplerMod : ModSystem
                 this.WatershedsLoaded = false;
 
                 this.serverAPI.Logger.Warning(
-                    "AlgernonsTerrainSampler: Watersheds height sample failed. Falling back to use the normal sampler. " +
+                    "AlgernonsTerrainSampler: Watershed's height sampler threw an exception. Falling back to use the normal sampler. " +
                     "Your terrain samples may be inconsistent with the actual terrain. {0}",
                     ex);
             }
@@ -161,13 +185,15 @@ public class TerrainSamplerMod : ModSystem
     private void TryReflectWatersheds()
     {
         const string typeName = "Watersheds.WorldGen.Terrain.WatershedsGenTerra";
-        const string methodName = "GetPreWatershedsBlockColumnHeight";
+        const string heightMethodName = "GetPreWatershedsBlockColumnHeight";
+        const string sampleMethodName = "SamplePreWatershedsColumn";
         string failure;
 
         try
         {
             Type type = AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetType(typeName)).FirstOrDefault(t => t != null);
-            this.watershedsGetHeightMethod = type?.GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance);
+            this.watershedsGetHeightMethod = type?.GetMethod(heightMethodName, BindingFlags.Public | BindingFlags.Instance);
+            this.watershedsSampleColumnMethod = type?.GetMethod(sampleMethodName, BindingFlags.Public | BindingFlags.Instance);
             this.watershedsGenTerraInstance = type == null ? null : this.serverAPI.ModLoader.Systems.FirstOrDefault(s => s.GetType() == type);
 
             if (type == null)
@@ -176,7 +202,7 @@ public class TerrainSamplerMod : ModSystem
             }
             else if (this.watershedsGetHeightMethod == null)
             {
-                failure = $"method '{methodName}' missing";
+                failure = $"method '{heightMethodName}' missing";
             }
             else if (this.watershedsGenTerraInstance == null)
             {
@@ -184,6 +210,9 @@ public class TerrainSamplerMod : ModSystem
             }
             else
             {
+                if (this.watershedsSampleColumnMethod != null)
+                    this.watershedsSampler = WatershedsSamplerCompatability.Setup(this.watershedsSampleColumnMethod.ReturnType);
+
                 this.WatershedsLoaded = true;
                 return;
             }
@@ -206,7 +235,9 @@ public class TerrainSamplerMod : ModSystem
         this.serverAPI = null;
         this.GenTerra = null;
         this.watershedsGetHeightMethod = null;
+        this.watershedsSampleColumnMethod = null;
         this.watershedsGenTerraInstance = null;
+        this.watershedsSampler = null;
         this.WatershedsLoaded = false;
         Mapping.ThreadSafeRegionCache.Dispose();
         Terrain.TerrainGenerationLib.DisposeContextCache();
