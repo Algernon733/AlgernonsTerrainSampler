@@ -62,8 +62,8 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
         this.forestMapByRegion.Clear();
         this.shrubMapByRegion.Clear();
 
-        if (GenMapsSubstitutions.NoiseLandforms.LandformsProperty == null)
-            GenMapsSubstitutions.NoiseLandforms.LoadLandforms(this.api);
+        // Every world loads its own: landform thresholds depend on the world height, and mods can patch the asset.
+        GenMapsSubstitutions.NoiseLandforms.LoadLandforms(this.api, reload: true);
 
         this.Landforms = GenMapsSubstitutions.NoiseLandforms.LandformsProperty;
 
