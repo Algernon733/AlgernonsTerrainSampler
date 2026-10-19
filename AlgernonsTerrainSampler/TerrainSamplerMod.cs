@@ -15,6 +15,14 @@ public class TerrainSamplerMod : ModSystem
 
     public bool WatershedsLoaded { get; private set; }
 
+    /// <summary>Whether Watersheds' detailed column sampler was found and is still in use.</summary>
+    public bool WatershedsDetailedSampling => this.WatershedsLoaded && this.watershedsSampleColumnMethod != null && this.watershedsSampler != null;
+
+    // What the sampler delegated to when the world started. The strict path refuses to answer once either has turned
+    // itself off after an error, so a tile cache never mixes Watersheds' heights with the sampler's own.
+    private bool watershedsAtStart;
+    private bool watershedsDetailedAtStart;
+
     private ICoreServerAPI serverAPI;
     private bool disposed;
     private MethodInfo watershedsGetHeightMethod;
@@ -44,6 +52,9 @@ public class TerrainSamplerMod : ModSystem
 
         if (this.serverAPI.ModLoader.Mods.Any(m => m.Info?.ModID == "watersheds"))
             this.TryReflectWatersheds();
+
+        this.watershedsAtStart = this.WatershedsLoaded;
+        this.watershedsDetailedAtStart = this.WatershedsDetailedSampling;
 
         TerrainSamplerCommand command = new(this);
         _ = this.serverAPI.ChatCommands
@@ -128,49 +139,10 @@ public class TerrainSamplerMod : ModSystem
         if (this.GenTerra == null)
             return new TerrainColumnSample { Height = TerraGenConfig.seaLevel };
 
-        if (this.WatershedsLoaded && this.watershedsSampleColumnMethod != null
-            && this.watershedsGenTerraInstance != null && this.watershedsSampler != null)
-        {
-            try
-            {
-                Type watershedsCoordinateType = this.watershedsSampleColumnMethod.GetParameters()[0].ParameterType;
-                object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
-                object sampleResult = this.watershedsSampleColumnMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
-                return this.watershedsSampler.ReadSample(sampleResult);
-            }
-            catch (Exception ex)
-            {
-                this.watershedsSampleColumnMethod = null;
-                this.watershedsSampler = null;
+        if (this.TrySampleWatershedsColumn(worldCoordinate, rethrow: false, out TerrainColumnSample watershedsSample))
+            return watershedsSample;
 
-                this.serverAPI.Logger.Warning(
-                    "AlgernonsTerrainSampler: Watersheds' detailed sampler threw an exception. Falling back to just the height sampler. " +
-                    "You wont get climate, rainfall, forest opacity etc. {0}",
-                    ex);
-            }
-        }
-
-        int? heightOverride = null;
-        if (this.WatershedsLoaded && this.watershedsGetHeightMethod != null && this.watershedsGenTerraInstance != null)
-        {
-            try
-            {
-                Type watershedsCoordinateType = this.watershedsGetHeightMethod.GetParameters()[0].ParameterType;
-                object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
-                object result = this.watershedsGetHeightMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
-                heightOverride = (int)result;
-            }
-            catch (Exception ex)
-            {
-                // Disable to avoid log spam
-                this.WatershedsLoaded = false;
-
-                this.serverAPI.Logger.Warning(
-                    "AlgernonsTerrainSampler: Watershed's height sampler threw an exception. Falling back to use the normal sampler. " +
-                    "Your terrain samples may be inconsistent with the actual terrain. {0}",
-                    ex);
-            }
-        }
+        int? heightOverride = this.SampleWatershedsHeight(worldCoordinate, rethrow: false);
 
         try
         {
@@ -179,6 +151,76 @@ public class TerrainSamplerMod : ModSystem
         catch (Exception)
         {
             return new TerrainColumnSample { Height = heightOverride ?? TerraGenConfig.seaLevel };
+        }
+    }
+
+    /// <summary>
+    /// <see cref="SampleColumn(WorldMapCoordinate)"/> without its fallbacks: a failure throws rather than answering
+    /// sea level, and so does a Watersheds delegation that has turned itself off since the world started. Anything
+    /// that keeps samples, such as the tile cache, must use this, or one bad moment becomes flat ground for good.
+    /// </summary>
+    internal TerrainColumnSample SampleColumnOrThrow(WorldMapCoordinate worldCoordinate)
+    {
+        TerrainSamplerGenTerra genTerra = this.GenTerra ?? throw new InvalidOperationException("The terrain sampler has not started.");
+        if (this.WatershedsLoaded != this.watershedsAtStart || this.WatershedsDetailedSampling != this.watershedsDetailedAtStart)
+            throw new InvalidOperationException("Watersheds delegation changed after an error; restart the server to sample again.");
+
+        if (this.TrySampleWatershedsColumn(worldCoordinate, rethrow: true, out TerrainColumnSample watershedsSample))
+            return watershedsSample;
+
+        return genTerra.SampleColumn(worldCoordinate, this.SampleWatershedsHeight(worldCoordinate, rethrow: true));
+    }
+
+    private bool TrySampleWatershedsColumn(WorldMapCoordinate worldCoordinate, bool rethrow, out TerrainColumnSample sample)
+    {
+        sample = default;
+        if (!this.WatershedsLoaded || this.watershedsSampleColumnMethod == null
+            || this.watershedsGenTerraInstance == null || this.watershedsSampler == null)
+            return false;
+
+        try
+        {
+            Type watershedsCoordinateType = this.watershedsSampleColumnMethod.GetParameters()[0].ParameterType;
+            object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
+            object sampleResult = this.watershedsSampleColumnMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
+            sample = this.watershedsSampler.ReadSample(sampleResult);
+            return true;
+        }
+        catch (Exception ex) when (!rethrow)
+        {
+            this.watershedsSampleColumnMethod = null;
+            this.watershedsSampler = null;
+
+            this.serverAPI.Logger.Warning(
+                "AlgernonsTerrainSampler: Watersheds' detailed sampler threw an exception. Falling back to just the height sampler. " +
+                "You wont get climate, rainfall, forest opacity etc. {0}",
+                ex);
+            return false;
+        }
+    }
+
+    private int? SampleWatershedsHeight(WorldMapCoordinate worldCoordinate, bool rethrow)
+    {
+        if (!this.WatershedsLoaded || this.watershedsGetHeightMethod == null || this.watershedsGenTerraInstance == null)
+            return null;
+
+        try
+        {
+            Type watershedsCoordinateType = this.watershedsGetHeightMethod.GetParameters()[0].ParameterType;
+            object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
+            object result = this.watershedsGetHeightMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
+            return (int)result;
+        }
+        catch (Exception ex) when (!rethrow)
+        {
+            // Disable to avoid log spam
+            this.WatershedsLoaded = false;
+
+            this.serverAPI.Logger.Warning(
+                "AlgernonsTerrainSampler: Watershed's height sampler threw an exception. Falling back to use the normal sampler. " +
+                "Your terrain samples may be inconsistent with the actual terrain. {0}",
+                ex);
+            return null;
         }
     }
 

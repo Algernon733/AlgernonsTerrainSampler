@@ -47,6 +47,20 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
 
     public GenMaps BasegameGenMaps { get; set; }
 
+    /// <summary>
+    /// Whether this world's generators have started, so that sampling can give real answers.
+    /// False on any world type but "standard", whose generator this reimplements.
+    /// </summary>
+    public bool IsReady
+    {
+        get
+        {
+            GenMaps genMaps = this.BasegameGenMaps;
+            return this.TerrainNoise != null && genMaps?.landformsGen != null && genMaps.upheavelGen != null
+                && genMaps.oceanGen != null && genMaps.climateGen != null;
+        }
+    }
+
     public override bool ShouldLoad(EnumAppSide side) => side == EnumAppSide.Server;
     public override double ExecuteOrder() => 0;
     public override void StartServerSide(ICoreServerAPI api)
@@ -187,6 +201,8 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
         GenMaps genMaps = this.BasegameGenMaps;
         if (genMaps?.landformsGen == null || genMaps.upheavelGen == null || genMaps.oceanGen == null)
             throw new InvalidOperationException("Terrain generators not initialized.");
+        if (this.TerrainNoise == null)
+            throw new InvalidOperationException("Terrain noise not initialized; only the standard world type can be sampled.");
 
         SmallChunkMapCoordinate currentChunkCoordinate = worldCoordinate.ToChunk();
         TerrainGenerationContext context = CreateTerrainGenerationContext(this, currentChunkCoordinate, includeClimate: true);
@@ -218,6 +234,8 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
         GenMaps genMaps = this.BasegameGenMaps;
         if (genMaps?.landformsGen == null || genMaps.upheavelGen == null || genMaps.oceanGen == null || genMaps.climateGen == null)
             throw new InvalidOperationException("Terrain generators not initialized.");
+        if (this.TerrainNoise == null)
+            throw new InvalidOperationException("Terrain noise not initialized; only the standard world type can be sampled.");
 
         SmallChunkMapCoordinate currentChunkCoordinate = worldCoordinate.ToChunk();
         TerrainGenerationContext context = CreateTerrainGenerationContext(this, currentChunkCoordinate, includeClimate: true);
