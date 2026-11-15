@@ -26,9 +26,13 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
 
     private ICoreServerAPI api;
 
-    public ConcurrentDictionary<int, LerpedWeightedIndex2DMap> LandformMapByRegion = new();
-    private readonly ConcurrentDictionary<int, IntDataMap2D> forestMapByRegion = new();
-    private readonly ConcurrentDictionary<int, IntDataMap2D> shrubMapByRegion = new();
+    // The regions kept of each. A landform map's weights are about 80 KiB a region; forest and shrub maps are small.
+    private const int LandformRegionsKept = 512;
+    private const int DensityRegionsKept = 1024;
+
+    public RegionCache<LerpedWeightedIndex2DMap> LandformMapByRegion { get; } = new(LandformRegionsKept);
+    private readonly RegionCache<IntDataMap2D> forestMapByRegion = new(DensityRegionsKept);
+    private readonly RegionCache<IntDataMap2D> shrubMapByRegion = new(DensityRegionsKept);
 
     public int RegionMapSize { get; private set; }
     public int MapSizeY => this.api.WorldManager.MapSizeY;
@@ -45,21 +49,22 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
 
     public ThreadLocal<ThreadLocalTempData> TempDataThreadLocal { get; private set; }
 
+    /// <summary>
+    /// The game's own map generators. No longer read by the sampler, which keeps its own (<see cref="Maps"/>): the game
+    /// uses these from its worldgen thread without a lock.
+    /// </summary>
     public GenMaps BasegameGenMaps { get; set; }
+
+    /// <summary>The sampler's own map generators for this world.</summary>
+    public GenMapsSubstitutions.SamplerGenMaps Maps => this.maps ??= this.api?.ModLoader.GetModSystem<GenMapsSubstitutions.SamplerGenMaps>();
+
+    private GenMapsSubstitutions.SamplerGenMaps maps;
 
     /// <summary>
     /// Whether this world's generators have started, so that sampling can give real answers.
     /// False on any world type but "standard", whose generator this reimplements.
     /// </summary>
-    public bool IsReady
-    {
-        get
-        {
-            GenMaps genMaps = this.BasegameGenMaps;
-            return this.TerrainNoise != null && genMaps?.landformsGen != null && genMaps.upheavelGen != null
-                && genMaps.oceanGen != null && genMaps.climateGen != null;
-        }
-    }
+    public bool IsReady => this.TerrainNoise != null && this.Maps?.IsReady == true;
 
     public override bool ShouldLoad(EnumAppSide side) => side == EnumAppSide.Server;
     public override double ExecuteOrder() => 0;
@@ -72,6 +77,8 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
     public void InitWorldGen()
     {
         this.LoadGlobalConfig(this.api);
+        // Cleared, not replaced: a world generator started again while the game runs (/wgen regen) must not dispose what
+        // samples in flight are reading.
         this.LandformMapByRegion.Clear();
         this.forestMapByRegion.Clear();
         this.shrubMapByRegion.Clear();
@@ -114,6 +121,9 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
     {
         this.TempDataThreadLocal?.Dispose();
         this.TempDataThreadLocal = null;
+        this.LandformMapByRegion.Dispose();
+        this.forestMapByRegion.Dispose();
+        this.shrubMapByRegion.Dispose();
         base.Dispose();
     }
 
@@ -198,8 +208,7 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
 
     public int GetBlockColumnHeight(WorldMapCoordinate worldCoordinate)
     {
-        GenMaps genMaps = this.BasegameGenMaps;
-        if (genMaps?.landformsGen == null || genMaps.upheavelGen == null || genMaps.oceanGen == null)
+        if (this.Maps?.IsReady != true)
             throw new InvalidOperationException("Terrain generators not initialized.");
         if (this.TerrainNoise == null)
             throw new InvalidOperationException("Terrain noise not initialized; only the standard world type can be sampled.");
@@ -231,8 +240,7 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
 
     public TerrainColumnSample SampleColumn(WorldMapCoordinate worldCoordinate, int? heightOverride)
     {
-        GenMaps genMaps = this.BasegameGenMaps;
-        if (genMaps?.landformsGen == null || genMaps.upheavelGen == null || genMaps.oceanGen == null || genMaps.climateGen == null)
+        if (this.Maps?.IsReady != true)
             throw new InvalidOperationException("Terrain generators not initialized.");
         if (this.TerrainNoise == null)
             throw new InvalidOperationException("Terrain noise not initialized; only the standard world type can be sampled.");
@@ -289,35 +297,48 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
         forestDensity = 0f;
         shrubDensity = 0f;
 
-        GenMaps genMaps = this.BasegameGenMaps;
-        if (genMaps?.climateGen == null || genMaps.forestGen == null || genMaps.bushGen == null)
+        GenMapsSubstitutions.SamplerGenMaps maps = this.Maps;
+        if (maps?.IsReady != true)
             return;
 
         ChunkInRegionMapCoordinate chunkInRegionCoordinate = chunkCoordinate.ToChunkInRegion(this.RegionChunkSize);
         RegionMapCoordinate regionCoordinate = chunkCoordinate.ToRegion(this.RegionChunkSize);
+        RegionMaps regionMaps = this.MapsOfRegion(regionCoordinate, maps);
 
-        IntDataMap2D climateMap = ThreadSafeRegionCache.GetRegionMap(
-            regionCoordinate, this.RegionSize, 2, TerraGenConfig.climateMapScale, genMaps.climateGen, "climate");
+        forestDensity = SampleDensityMap(regionMaps.Forest, chunkInRegionCoordinate, blockColumnInChunkCoordinate);
+        shrubDensity = SampleDensityMap(regionMaps.Shrub, chunkInRegionCoordinate, blockColumnInChunkCoordinate);
+    }
 
-        IntDataMap2D forestMap = this.GetOrCreateClimateDerivedMap(
-            this.forestMapByRegion, regionCoordinate, climateMap, genMaps.forestGen, TerraGenConfig.forestMapScale);
+    /// <summary>A map region's maps as the sampler makes them, padded as vanilla's <c>GenMaps.OnMapRegionGen</c> pads its own.</summary>
+    internal readonly record struct RegionMaps(IntDataMap2D Climate, IntDataMap2D Upheaval, IntDataMap2D Ocean, IntDataMap2D Landform, IntDataMap2D Forest, IntDataMap2D Shrub);
 
-        IntDataMap2D shrubMap = this.GetOrCreateClimateDerivedMap(
-            this.shrubMapByRegion, regionCoordinate, climateMap, genMaps.bushGen, TerraGenConfig.shrubMapScale);
+    /// <summary>
+    /// The maps the sampler reads for <paramref name="regionCoordinate"/>, from its caches: for comparing with the maps the
+    /// world saved (<c>/terrainsampler mapcheck</c>).
+    /// </summary>
+    internal RegionMaps MapsOfRegion(RegionMapCoordinate regionCoordinate, GenMapsSubstitutions.SamplerGenMaps maps)
+    {
+        IntDataMap2D climate = ThreadSafeRegionCache.GetRegionMap(
+            regionCoordinate, this.RegionSize, 2, TerraGenConfig.climateMapScale, maps.ClimateGen, "climate", maps.ClimateLock);
 
-        forestDensity = SampleDensityMap(forestMap, chunkInRegionCoordinate, blockColumnInChunkCoordinate);
-        shrubDensity = SampleDensityMap(shrubMap, chunkInRegionCoordinate, blockColumnInChunkCoordinate);
+        return new RegionMaps(
+            climate,
+            ThreadSafeRegionCache.GetRegionMap(regionCoordinate, this.RegionSize, 3, TerraGenConfig.climateMapScale, maps.UpheavalGen, "upheaval"),
+            ThreadSafeRegionCache.GetRegionMap(regionCoordinate, this.RegionSize, 5, TerraGenConfig.oceanMapScale, maps.OceanGen, "ocean"),
+            ThreadSafeRegionCache.GetRegionMap(
+                regionCoordinate, this.RegionSize, TerraGenConfig.landformMapPadding, TerraGenConfig.landformMapScale, maps.LandformsGen, "landform", maps.LandformsLock),
+            this.GetOrCreateClimateDerivedMap(this.forestMapByRegion, regionCoordinate, climate, maps.ForestGen, TerraGenConfig.forestMapScale),
+            this.GetOrCreateClimateDerivedMap(this.shrubMapByRegion, regionCoordinate, climate, maps.ShrubGen, TerraGenConfig.shrubMapScale));
     }
 
     private IntDataMap2D GetOrCreateClimateDerivedMap(
-        ConcurrentDictionary<int, IntDataMap2D> cache,
+        RegionCache<IntDataMap2D> cache,
         RegionMapCoordinate regionCoordinate,
         IntDataMap2D climateMap,
         MapLayerBase generator,
         int scale)
     {
-        int key = (regionCoordinate.Z * this.RegionMapSize) + regionCoordinate.X;
-        return cache.GetOrAdd(key, _ =>
+        return cache.GetOrAdd(regionCoordinate.X, regionCoordinate.Z, () =>
         {
             IntDataMap2D outputMap = new();
             int size = this.RegionSize / scale;

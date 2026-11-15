@@ -179,12 +179,9 @@ public static class TerrainGenerationLib
         IntDataMap2D landformMap,
         int regionX,
         int regionZ,
-        ConcurrentDictionary<int, LerpedWeightedIndex2DMap> LandformMapByRegion,
-        int regionMapSize)
+        RegionCache<LerpedWeightedIndex2DMap> LandformMapByRegion)
     {
-        int key = (regionZ * regionMapSize) + regionX;
-
-        return LandformMapByRegion.GetOrAdd(key, _ => new LerpedWeightedIndex2DMap(
+        return LandformMapByRegion.GetOrAdd(regionX, regionZ, () => new LerpedWeightedIndex2DMap(
             landformMap.Data,
             landformMap.Size,
             TerraGenConfig.landFormSmoothingRadius,
@@ -327,27 +324,27 @@ public static class TerrainGenerationLib
 
         int regionChunkSize = genTerra.RegionChunkSize;
         int regionSize = genTerra.RegionSize;
-        GenMaps genMaps = genTerra.BasegameGenMaps;
+        GenMapsSubstitutions.SamplerGenMaps maps = genTerra.Maps;
 
         ChunkInRegionMapCoordinate chunkInRegionCoordinate = currentChunkCoordinate.ToChunkInRegion(regionChunkSize);
         RegionMapCoordinate regionCoordinate = currentChunkCoordinate.ToRegion(regionChunkSize);
 
-        RegionMapCorners LoadCorners(MapLayerBase gen, int padding, int scale, string name)
+        RegionMapCorners LoadCorners(MapLayerBase gen, int padding, int scale, string name, object generatorLock = null)
         {
-            IntDataMap2D regionMap = ThreadSafeRegionCache.GetRegionMap(regionCoordinate, regionSize, padding, scale, gen, name);
+            IntDataMap2D regionMap = ThreadSafeRegionCache.GetRegionMap(regionCoordinate, regionSize, padding, scale, gen, name, generatorLock);
             return new RegionMapCorners(regionMap, regionChunkSize, chunkInRegionCoordinate);
         }
 
         IntDataMap2D regionLandformsMap = ThreadSafeRegionCache.GetRegionMap(
             regionCoordinate, regionSize,
             TerraGenConfig.landformMapPadding, TerraGenConfig.landformMapScale,
-            genMaps.landformsGen, "landform");
+            maps.LandformsGen, "landform", maps.LandformsLock);
 
-        RegionMapCorners upheavalMapCorners = LoadCorners(genMaps.upheavelGen, 3, TerraGenConfig.climateMapScale, "upheaval");
-        RegionMapCorners oceanMapCorners = LoadCorners(genMaps.oceanGen, 5, TerraGenConfig.oceanMapScale, "ocean");
+        RegionMapCorners upheavalMapCorners = LoadCorners(maps.UpheavalGen, 3, TerraGenConfig.climateMapScale, "upheaval");
+        RegionMapCorners oceanMapCorners = LoadCorners(maps.OceanGen, 5, TerraGenConfig.oceanMapScale, "ocean");
         RegionMapCorners climateMapCorners;
         if (includeClimate)
-            climateMapCorners = LoadCorners(genMaps.climateGen, 2, TerraGenConfig.climateMapScale, "climate");
+            climateMapCorners = LoadCorners(maps.ClimateGen, 2, TerraGenConfig.climateMapScale, "climate", maps.ClimateLock);
         else
             climateMapCorners = default;
 
@@ -355,8 +352,7 @@ public static class TerrainGenerationLib
             regionLandformsMap,
             regionCoordinate.X,
             regionCoordinate.Z,
-            genTerra.LandformMapByRegion,
-            genTerra.RegionMapSize);
+            genTerra.LandformMapByRegion);
 
         float chunkPixelSize = regionLandformsMap.InnerSize / regionChunkSize;
         float chunkBlockDelta = 1.0f / CHUNK_SIZE;

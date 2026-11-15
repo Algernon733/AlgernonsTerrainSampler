@@ -95,6 +95,10 @@
     </Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="AlgernonsTerrainSampler.Tests" />
+  </ItemGroup>
+
   <!-- Creates/updates modinfo.json file in build directory -->
   <Target Name="ModInfo" AfterTargets="Build">
     <PropertyGroup>

@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using AlgernonsTerrainSampler.GenMapsSubstitutions;
 using Vintagestory.API.Common;
 using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
@@ -24,6 +25,7 @@ public class TerrainSamplerMod : ModSystem
     private bool watershedsDetailedAtStart;
 
     private ICoreServerAPI serverAPI;
+    private SamplerGenMaps genMaps;
     private bool disposed;
     private MethodInfo watershedsGetHeightMethod;
     private MethodInfo watershedsSampleColumnMethod;
@@ -40,10 +42,17 @@ public class TerrainSamplerMod : ModSystem
         this.serverAPI = api;
 
         api.Event.ServerRunPhase(EnumServerRunPhase.WorldReady, this.OnWorldReady);
+
+        // The game runs WorldReady before its world generators start, then starts them, then RunGame, then its chunk
+        // threads. This system's RunGame comes before the tile service's (its ExecuteOrder is lower).
+        api.Event.ServerRunPhase(EnumServerRunPhase.RunGame, this.OnRunGame);
     }
 
     private void OnWorldReady()
     {
+        // Its map generators, made when the world generator starts (after this) and settled when the game runs.
+        this.genMaps = this.serverAPI.ModLoader.GetModSystem<SamplerGenMaps>();
+
         this.GenTerra = this.serverAPI.ModLoader.GetModSystem<TerrainSamplerGenTerra>();
 
         GenMaps basegameGenMaps = this.serverAPI.ModLoader.GetModSystem<GenMaps>();
@@ -71,6 +80,12 @@ public class TerrainSamplerMod : ModSystem
                 .RequiresPrivilege(Privilege.chat)
                 .HandleWith(command.CmdSampleColumn)
             .EndSubCommand()
+            .BeginSubCommand("mapcheck")
+                .WithDescription("Compare the sampler's own climate, upheaval, ocean, landform, forest and shrub maps with the world's for the generated map regions round you (radius in regions, default 1, at most 4)")
+                .RequiresPrivilege(Privilege.controlserver)
+                .WithArgs(this.serverAPI.ChatCommands.Parsers.OptionalInt("radius", 1))
+                .HandleWith(command.CmdMapCheck)
+            .EndSubCommand()
 #if DEBUG
             .BeginSubCommand("columninfo")
                 .WithDescription("Get debug information about the terrain generation that went into generating the block column at your current position")
@@ -79,6 +94,18 @@ public class TerrainSamplerMod : ModSystem
             .EndSubCommand()
 #endif
             ;
+    }
+
+    // Every mod's world generator has started, and the game's chunk threads have not: the generators are settled here,
+    // once, before the tile service starts sampling (SamplerGenMaps).
+    private void OnRunGame()
+    {
+        if (this.genMaps == null)
+            return;
+
+        this.genMaps.Settle();
+        if (this.genMaps.IsReady)
+            this.serverAPI.Logger.Notification("AlgernonsTerrainSampler: {0}", this.genMaps.Describe());
     }
 
     /// <summary>
@@ -276,6 +303,7 @@ public class TerrainSamplerMod : ModSystem
         Instance = null;
         this.serverAPI = null;
         this.GenTerra = null;
+        this.genMaps = null;
         this.watershedsGetHeightMethod = null;
         this.watershedsSampleColumnMethod = null;
         this.watershedsGenTerraInstance = null;

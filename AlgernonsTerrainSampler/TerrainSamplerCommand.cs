@@ -1,8 +1,11 @@
 using System;
+using System.Linq;
 using System.Text;
 using Vintagestory.API.Common;
 using Vintagestory.API.Common.Entities;
+using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
+using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
 using AlgernonsTerrainSampler.Terrain;
 using static AlgernonsTerrainSampler.Terrain.TerrainGenerationLib;
@@ -67,6 +70,67 @@ public class TerrainSamplerCommand(TerrainSamplerMod mod)
         {
             return TextCommandResult.Error($"Failed to sample terrain column at ({x}, {z}): {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Compares the map regions round the caller that the world has generated with the sampler's own maps of them: the
+    /// climate, upheaval, ocean, landform, forest and shrub maps the sampler reads. A region the game forced a landform or
+    /// climate into (story structures) differs there, since the sampler does not apply those.
+    /// </summary>
+    public TextCommandResult CmdMapCheck(TextCommandCallingArgs args)
+    {
+        if (args.Caller.Entity?.Pos is not EntityPos position)
+            return TextCommandResult.Error("Run it as a player: it checks the map regions round you.");
+
+        TerrainSamplerGenTerra genTerra = mod.GenTerra;
+        GenMapsSubstitutions.SamplerGenMaps maps = genTerra?.Maps;
+        if (maps?.IsReady != true)
+            return TextCommandResult.Error("The sampler's map generators are not ready for this world (see the server log).");
+
+        ICoreServerAPI api = (ICoreServerAPI)args.Caller.Entity.Api;
+        int radius = Math.Clamp((int?)args[0] ?? 1, 0, 4);
+        int regionSize = api.WorldManager.RegionSize;
+        int centreX = (int)position.X / regionSize;
+        int centreZ = (int)position.Z / regionSize;
+        string[] names = ["climate", "upheaval", "ocean", "landform", "forest", "shrub"];
+        int[] same = new int[names.Length];
+        int[] cells = new int[names.Length];
+        int[] cellsDiffer = new int[names.Length];
+        int regions = 0;
+        for (int rz = centreZ - radius; rz <= centreZ + radius; rz++)
+        {
+            for (int rx = centreX - radius; rx <= centreX + radius; rx++)
+            {
+                IMapRegion saved = api.WorldManager.GetMapRegion(rx, rz);
+                if (saved == null)
+                    continue;
+
+                regions++;
+                TerrainSamplerGenTerra.RegionMaps ours = genTerra.MapsOfRegion(new RegionMapCoordinate(rx, rz), maps);
+                IntDataMap2D[] mine = [ours.Climate, ours.Upheaval, ours.Ocean, ours.Landform, ours.Forest, ours.Shrub];
+                IntDataMap2D[] theirs = [saved.ClimateMap, saved.UpheavelMap, saved.OceanMap, saved.LandformMap, saved.ForestMap, saved.ShrubMap];
+                for (int i = 0; i < names.Length; i++)
+                {
+                    int[] a = mine[i]?.Data ?? [];
+                    int[] b = theirs[i]?.Data ?? [];
+                    int differ = a.Length == b.Length ? a.Where((value, at) => value != b[at]).Count() : Math.Max(a.Length, b.Length);
+                    cells[i] += Math.Max(a.Length, b.Length);
+                    cellsDiffer[i] += differ;
+                    same[i] += differ == 0 ? 1 : 0;
+                }
+            }
+        }
+
+        if (regions == 0)
+            return TextCommandResult.Error("No map region round you has been generated yet.");
+
+        StringBuilder sb = new();
+        _ = sb.AppendLine(maps.Describe());
+        _ = sb.AppendLine($"The sampler's maps against the world's own, {regions} generated map regions:");
+        for (int i = 0; i < names.Length; i++)
+            _ = sb.AppendLine($"  {names[i]}: identical in {same[i]} of {regions} regions; {cellsDiffer[i]} of {cells[i]} cells differ");
+
+        return TextCommandResult.Success(sb.ToString());
     }
 
 #if DEBUG
