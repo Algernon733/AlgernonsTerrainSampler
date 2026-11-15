@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using Vintagestory.API.Common;
@@ -7,6 +8,7 @@ using Vintagestory.API.Datastructures;
 using Vintagestory.API.MathTools;
 using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
+using AlgernonsTerrainSampler.GenMapsSubstitutions;
 using AlgernonsTerrainSampler.Terrain;
 using static AlgernonsTerrainSampler.Terrain.TerrainGenerationLib;
 
@@ -47,7 +49,7 @@ public class TerrainSamplerCommand(TerrainSamplerMod mod)
 
         try
         {
-            TerrainColumnSample sample = mod.SampleColumn(x, z);
+            TerrainColumnSample sample = mod.SampleColumnWithTopRock(x, z);
 
             int climateR = (sample.ClimateColor >> 16) & 0xFF;
             int climateG = (sample.ClimateColor >> 8) & 0xFF;
@@ -62,7 +64,8 @@ public class TerrainSamplerCommand(TerrainSamplerMod mod)
                 .AppendLine($"  Temperature: {sample.Temperature:F4}/1")
                 .AppendLine($"  Rainfall: {sample.Rainfall:F4}/1")
                 .AppendLine($"  ForestDensity: {sample.ForestDensity:F4}/1")
-                .AppendLine($"  ShrubDensity: {sample.ShrubDensity:F4}/1");
+                .AppendLine($"  ShrubDensity: {sample.ShrubDensity:F4}/1")
+                .AppendLine($"  TopRock: {(sample.TopRock.Length > 0 ? sample.TopRock : "(not known)")}");
 
             return TextCommandResult.Success(sb.ToString());
         }
@@ -70,6 +73,116 @@ public class TerrainSamplerCommand(TerrainSamplerMod mod)
         {
             return TextCommandResult.Error($"Failed to sample terrain column at ({x}, {z}): {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The sampled top rock against what worldgen put in the generated chunks round the caller (<c>TopRockIdMap</c>, the
+    /// rock under the block layers), every column, each asked twice: at the chunk's own terrain height, which tests the
+    /// strata alone, and at the sampler's height, which is what consumers get.
+    /// </summary>
+    /// <remarks>
+    /// Two more lines tell a mistake in the walk from a world made differently: the walk on the world's own saved maps of
+    /// each region (vanilla's inputs exactly), and how many regions' saved maps differ from the ones the sampler makes from
+    /// the seed (an older game version or a mod that changed them would).
+    /// </remarks>
+    public TextCommandResult CmdRockCheck(TextCommandCallingArgs args)
+    {
+        if (mod.Rocks == null)
+            return TextCommandResult.Error("The sampler has no rock strata for this world (see the server log).");
+
+        if (args.Caller.Entity?.Pos is not EntityPos position)
+            return TextCommandResult.Error("Run it as a player: it checks the chunks round you.");
+
+        ICoreServerAPI api = (ICoreServerAPI)args.Caller.Entity.Api;
+
+        // At most 17 x 17 chunks, about 300,000 columns sampled on the main thread.
+        int radius = Math.Clamp((int?)args[0] ?? 4, 0, 8);
+        int centreX = (int)position.X / Mapping.CHUNK_SIZE;
+        int centreZ = (int)position.Z / Mapping.CHUNK_SIZE;
+        int columns = 0, strataMatch = 0, sampledMatch = 0, savedMatch = 0, savedColumns = 0, chunks = 0;
+        Dictionary<string, int> misses = [];
+        HashSet<(int, int)> regions = [];
+        Dictionary<(int, int), RockStrataSampler.SavedRegion> savedRegions = [];
+        int regionChunks = api.WorldManager.RegionSize / Mapping.CHUNK_SIZE;
+        for (int cz = centreZ - radius; cz <= centreZ + radius; cz++)
+        {
+            for (int cx = centreX - radius; cx <= centreX + radius; cx++)
+            {
+                IMapChunk mapChunk = api.WorldManager.GetMapChunk(cx, cz);
+                if (mapChunk?.TopRockIdMap == null || mapChunk.WorldGenTerrainHeightMap == null)
+                    continue;
+
+                chunks++;
+                _ = regions.Add((cx / regionChunks, cz / regionChunks));
+                (int, int) regionKey = (cx / regionChunks, cz / regionChunks);
+                if (!savedRegions.TryGetValue(regionKey, out RockStrataSampler.SavedRegion saved))
+                {
+                    IMapRegion mapRegion = api.WorldManager.GetMapRegion(regionKey.Item1, regionKey.Item2);
+                    saved = mapRegion == null ? null : RockStrataSampler.Saved(mapRegion);
+                    savedRegions[regionKey] = saved;
+                }
+                for (int lz = 0; lz < Mapping.CHUNK_SIZE; lz++)
+                {
+                    for (int lx = 0; lx < Mapping.CHUNK_SIZE; lx++)
+                    {
+                        int at = (lz * Mapping.CHUNK_SIZE) + lx;
+                        int rockId = mapChunk.TopRockIdMap[at];
+                        if (rockId <= 0)
+                            continue;
+
+                        string actual = api.World.Blocks[rockId]?.Code?.ToString() ?? "";
+                        int x = (cx * Mapping.CHUNK_SIZE) + lx;
+                        int z = (cz * Mapping.CHUNK_SIZE) + lz;
+                        string byStrata = mod.Rocks.TopRock(x, z, mapChunk.WorldGenTerrainHeightMap[at]);
+                        string bySample = mod.SampleColumnWithTopRock(x, z).TopRock;
+                        string bySaved = saved == null ? null : mod.Rocks.TopRockFromSaved(saved, x, z, mapChunk.WorldGenTerrainHeightMap[at]);
+                        columns++;
+                        strataMatch += byStrata == actual ? 1 : 0;
+                        sampledMatch += bySample == actual ? 1 : 0;
+                        if (bySaved != null)
+                        {
+                            savedColumns++;
+                            savedMatch += bySaved == actual ? 1 : 0;
+                        }
+                        if (byStrata != actual)
+                        {
+                            string key = $"{byStrata} for {actual}";
+                            misses[key] = (misses.TryGetValue(key, out int seen) ? seen : 0) + 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (columns == 0)
+            return TextCommandResult.Error("No generated chunks with a top rock map round you.");
+
+        StringBuilder sb = new();
+        _ = sb.AppendLine($"Top rock against {chunks} generated chunks, {columns} columns:")
+            .AppendLine($"  at the chunks' own terrain height (the strata alone): {100.0 * strataMatch / columns:F1} %")
+            .AppendLine($"  as sampled, at the sampler's height: {100.0 * sampledMatch / columns:F1} %")
+            .AppendLine(savedColumns == 0
+                ? "  with the world's own saved maps: no saved maps to read"
+                : $"  with the world's own saved maps, at the chunks' height: {100.0 * savedMatch / savedColumns:F1} % of {savedColumns}");
+
+        int strataDiffer = 0, provincesDiffer = 0, compared = 0;
+        foreach ((int rx, int rz) in regions)
+        {
+            IMapRegion mapRegion = api.WorldManager.GetMapRegion(rx, rz);
+            if (mapRegion == null)
+                continue;
+
+            (int differ, _, bool provinces) = mod.Rocks.CompareSaved(mapRegion, rx, rz);
+            compared++;
+            strataDiffer += differ > 0 ? 1 : 0;
+            provincesDiffer += provinces ? 1 : 0;
+        }
+
+        _ = sb.AppendLine($"  saved maps against the seed's, {compared} map regions: strata differ in {strataDiffer}, provinces in {provincesDiffer}");
+        foreach (KeyValuePair<string, int> miss in misses.OrderByDescending(m => m.Value).Take(5))
+            _ = sb.AppendLine($"  {miss.Value} columns gave {miss.Key}");
+
+        return TextCommandResult.Success(sb.ToString());
     }
 
     /// <summary>

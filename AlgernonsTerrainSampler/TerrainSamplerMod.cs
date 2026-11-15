@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using AlgernonsTerrainSampler.GenMapsSubstitutions;
 using Vintagestory.API.Common;
 using Vintagestory.API.Server;
@@ -13,6 +14,9 @@ public class TerrainSamplerMod : ModSystem
     public static TerrainSamplerMod Instance { get; private set; }
 
     public TerrainSamplerGenTerra GenTerra { get; private set; }
+
+    /// <summary>Vanilla's rock strata for any column, or null when there are none for this world (the server log says why).</summary>
+    public RockStrataSampler Rocks => this.genMaps?.Rocks;
 
     public bool WatershedsLoaded { get; private set; }
 
@@ -27,6 +31,9 @@ public class TerrainSamplerMod : ModSystem
     private ICoreServerAPI serverAPI;
     private SamplerGenMaps genMaps;
     private bool disposed;
+
+    // Top rock failures logged so far: the first with its stack trace, then a count now and then, never one per sample.
+    private int rockFailures;
     private MethodInfo watershedsGetHeightMethod;
     private MethodInfo watershedsSampleColumnMethod;
     private object watershedsGenTerraInstance;
@@ -79,6 +86,12 @@ public class TerrainSamplerMod : ModSystem
                 .WithDescription("Get a detailed terrain column sample at your current position")
                 .RequiresPrivilege(Privilege.chat)
                 .HandleWith(command.CmdSampleColumn)
+            .EndSubCommand()
+            .BeginSubCommand("rockcheck")
+                .WithDescription("Compare the sampled top rock with the generated chunks round you (radius in chunks, default 4, at most 8)")
+                .RequiresPrivilege(Privilege.controlserver)
+                .WithArgs(this.serverAPI.ChatCommands.Parsers.OptionalInt("radius", 4))
+                .HandleWith(command.CmdRockCheck)
             .EndSubCommand()
             .BeginSubCommand("mapcheck")
                 .WithDescription("Compare the sampler's own climate, upheaval, ocean, landform, forest and shrub maps with the world's for the generated map regions round you (radius in regions, default 1, at most 4)")
@@ -167,6 +180,8 @@ public class TerrainSamplerMod : ModSystem
     /// <summary>
     /// Samples terrain height and worldgen map data at the specified world coordinate.
     /// If Watersheds is loaded, we delegate to watersheds' sampler.
+    /// <see cref="TerrainColumnSample.TopRock"/> is left empty, as it was before 2.0.0; <see cref="SampleColumnWithTopRock(int, int)"/>
+    /// adds it, at the cost of the rock strata.
     /// </summary>
     public TerrainColumnSample SampleColumn(int worldX, int worldZ)
         => this.SampleColumn(new WorldMapCoordinate(worldX, worldZ));
@@ -193,9 +208,51 @@ public class TerrainSamplerMod : ModSystem
     }
 
     /// <summary>
-    /// <see cref="SampleColumn(WorldMapCoordinate)"/> without its fallbacks: a failure throws rather than answering
-    /// sea level, and so does a Watersheds delegation that has turned itself off since the world started. Anything
-    /// that keeps samples, such as the tile cache, must use this, or one bad moment becomes flat ground for good.
+    /// <see cref="SampleColumn(int, int)"/> with <see cref="TerrainColumnSample.TopRock"/>: the rock at the top of the
+    /// column, from vanilla's rock strata. Empty where the world has none the sampler knows, or the rock could not be
+    /// worked out.
+    /// </summary>
+    public TerrainColumnSample SampleColumnWithTopRock(int worldX, int worldZ)
+        => this.SampleColumnWithTopRock(new WorldMapCoordinate(worldX, worldZ));
+
+    /// <inheritdoc cref="SampleColumnWithTopRock(int, int)"/>
+    public TerrainColumnSample SampleColumnWithTopRock(WorldMapCoordinate worldCoordinate)
+        => this.WithRock(this.SampleColumn(worldCoordinate), worldCoordinate, rethrow: false);
+
+    /// <summary>
+    /// The rock at the top of the column, as <see cref="TerrainColumnSample.TopRock"/> has it, for a column of terrain
+    /// height <paramref name="height"/>; empty when the world's strata are not vanilla's.
+    /// </summary>
+    public string GetTopRock(int worldX, int worldZ, int height)
+        => this.Rocks?.TopRock(worldX, worldZ, height) ?? "";
+
+    private TerrainColumnSample WithRock(TerrainColumnSample sample, WorldMapCoordinate worldCoordinate, bool rethrow)
+    {
+        RockStrataSampler rocks = this.Rocks;
+        if (rocks == null)
+            return sample;
+
+        try
+        {
+            return sample with { TopRock = rocks.TopRock(worldCoordinate.X, worldCoordinate.Z, sample.Height) };
+        }
+        catch (Exception ex) when (!rethrow)
+        {
+            int failures = Interlocked.Increment(ref this.rockFailures);
+            if (failures == 1)
+                this.serverAPI?.Logger.Warning("AlgernonsTerrainSampler: the top rock could not be worked out at {0}; further failures are counted, not logged: {1}", worldCoordinate, ex);
+            else if (failures % 10000 == 0)
+                this.serverAPI?.Logger.Warning("AlgernonsTerrainSampler: the top rock could not be worked out {0} times, the last at {1}: {2}", failures, worldCoordinate, ex.Message);
+
+            return sample;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="SampleColumnWithTopRock(WorldMapCoordinate)"/> without its fallbacks: a failure throws rather than
+    /// answering sea level or no rock, and so does a Watersheds delegation that has turned itself off since the world
+    /// started. Anything that keeps samples, such as the tile cache, must use this, or one bad moment becomes flat ground
+    /// for good.
     /// </summary>
     internal TerrainColumnSample SampleColumnOrThrow(WorldMapCoordinate worldCoordinate)
     {
@@ -204,9 +261,9 @@ public class TerrainSamplerMod : ModSystem
             throw new InvalidOperationException("Watersheds delegation changed after an error; restart the server to sample again.");
 
         if (this.TrySampleWatershedsColumn(worldCoordinate, rethrow: true, out TerrainColumnSample watershedsSample))
-            return watershedsSample;
+            return this.WithRock(watershedsSample, worldCoordinate, rethrow: true);
 
-        return genTerra.SampleColumn(worldCoordinate, this.SampleWatershedsHeight(worldCoordinate, rethrow: true));
+        return this.WithRock(genTerra.SampleColumn(worldCoordinate, this.SampleWatershedsHeight(worldCoordinate, rethrow: true)), worldCoordinate, rethrow: true);
     }
 
     private bool TrySampleWatershedsColumn(WorldMapCoordinate worldCoordinate, bool rethrow, out TerrainColumnSample sample)

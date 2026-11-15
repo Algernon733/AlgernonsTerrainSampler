@@ -43,7 +43,8 @@ internal sealed class FakeTerrain
             Rainfall = (a >> 8 & 0xFF) / 255f,
             Temperature = (b >> 24) / 255f,
             ForestDensity = (a >> 16) / 65535f,
-            ShrubDensity = (b & 0xFFFF) / 65535f
+            ShrubDensity = (b & 0xFFFF) / 65535f,
+            TopRock = ""
         };
 
         static uint Mix(uint h)
@@ -63,7 +64,8 @@ internal sealed class FakeTerrain
         Rainfall = ((x / 32) & 0xFF) / 255f,
         Temperature = ((x / 64) & 0xFF) / 255f,
         ForestDensity = (float)(0.5 + (0.5 * Math.Sin((x + z) / 211.0))),
-        ShrubDensity = (float)(0.25 + (0.25 * Math.Cos((x - z) / 173.0)))
+        ShrubDensity = (float)(0.25 + (0.25 * Math.Cos((x - z) / 173.0))),
+        TopRock = (((x / 200) + (z / 300)) % 3) switch { 0 => "game:rock-granite", 1 => "game:rock-sandstone", _ => "" }
     };
 }
 

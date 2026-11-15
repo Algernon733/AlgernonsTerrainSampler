@@ -71,7 +71,41 @@ public class TileFormatTests
         Assert.Equal(tile.Rainfall, decoded.Rainfall);
         Assert.Equal(tile.Forest, decoded.Forest);
         Assert.Equal(tile.Shrub, decoded.Shrub);
-        Assert.True(encoded.Length < TerrainTileKey.ColumnCount * 10 / 2, $"{encoded.Length} bytes is not under half the raw size.");
+        Assert.Equal(tile.Rock, decoded.Rock);
+        Assert.Equal(tile.RockCodes, decoded.RockCodes);
+        Assert.True(encoded.Length < TerrainTileKey.ColumnCount * 11 / 2, $"{encoded.Length} bytes is not under half the raw size.");
+    }
+
+    [Fact]
+    public void A_tile_keeps_each_columns_top_rock_by_code()
+    {
+        TerrainTileKey key = new(64, 30, 31);
+        TerrainTile tile = Make(key);
+        TerrainTile decoded = TerrainTileCodec.Decode(TerrainTileCodec.Encode(tile), key);
+        int known = 0;
+        for (int i = 0; i < TerrainTileKey.ColumnCount; i++)
+        {
+            string expected = FakeTerrain.Column(key.SampleX(i % TerrainTileKey.Samples), key.SampleZ(i / TerrainTileKey.Samples)).TopRock;
+            Assert.Equal(expected, decoded.TopRock(i));
+            Assert.Equal(expected, decoded.Column(i).TopRock);
+            known += expected.Length > 0 ? 1 : 0;
+        }
+
+        Assert.InRange(known, 1, TerrainTileKey.ColumnCount - 1);
+        Assert.Equal("", decoded.RockCodes[0]);
+    }
+
+    [Fact]
+    public void A_tile_of_another_version_or_other_fields_is_not_read_as_this_one()
+    {
+        TerrainTileKey key = new(4, 5, 6);
+        byte[] otherVersion = TerrainTileCodec.Encode(Make(key));
+        otherVersion[4] = TerrainTileCodec.FormatVersion + 1;
+        Assert.False(TerrainTileCodec.TryReadHeader(otherVersion, out _));
+
+        byte[] otherFields = TerrainTileCodec.Encode(Make(key));
+        otherFields[16] = 0x7F;
+        Assert.False(TerrainTileCodec.TryReadHeader(otherFields, out _));
     }
 
     [Fact]
@@ -87,6 +121,7 @@ public class TileFormatTests
         Assert.Equal(column.Rainfall, back.Rainfall, 1f / 255f);
         Assert.Equal(column.ForestDensity, back.ForestDensity, 1f / 65535f);
         Assert.Equal(column.ShrubDensity, back.ShrubDensity, 1f / 65535f);
+        Assert.Equal(column.TopRock, back.TopRock);
     }
 
     [Fact]
@@ -127,5 +162,14 @@ public class TileFormatTests
         Assert.Equal(64, columns.Length);
         Assert.Equal(64, columns.Distinct().Count());
         Assert.Equal(4, columns.Select(c => (c.X / 512, c.Z / 512)).Distinct().Count());
+    }
+
+    [Fact]
+    public void A_canary_column_whose_rock_changes_changes_the_identity()
+    {
+        TerrainColumnSample granite = FakeTerrain.Column(5123, 7777) with { TopRock = "game:rock-granite" };
+        string before = TerrainTileIdentity.Hash(writer => TerrainTileIdentity.WriteSample(writer, granite));
+        string after = TerrainTileIdentity.Hash(writer => TerrainTileIdentity.WriteSample(writer, granite with { TopRock = "game:rock-basalt" }));
+        Assert.NotEqual(before, after);
     }
 }

@@ -12,8 +12,8 @@ using Vintagestory.ServerMods;
 namespace AlgernonsTerrainSampler.GenMapsSubstitutions;
 
 /// <summary>
-/// The map generators the sampler reads (climate, upheaval, ocean, forest, shrub and landforms). Each
-/// generator is the sampler's own copy, made from the seed and the world configuration as vanilla's
+/// The map generators the sampler reads (climate, upheaval, ocean, forest, shrub and landforms) and the top rock
+/// sampler. Each generator is the sampler's own copy, made from the seed and the world configuration as vanilla's
 /// <c>GenMaps.initWorldGen</c> makes the game's, parameter for parameter, unless a mod has replaced the game's: then the
 /// game's is followed, as before 2.0.0.
 /// </summary>
@@ -39,7 +39,8 @@ namespace AlgernonsTerrainSampler.GenMapsSubstitutions;
 /// <para>
 /// When: after <c>GenMaps</c>' own start (this system's <see cref="ExecuteOrder"/> is later than its, and the game runs
 /// those handlers in order). The ocean layer reads the spawn point <c>GenMaps</c> forces to land, and the upheaval layer
-/// the commonness <c>GenMaps</c> reads from the world configuration. A world
+/// the commonness <c>GenMaps</c> reads from the world configuration. Making the geologic province layer for the top rock
+/// reloads vanilla's static provinces, which is only safe before any chunk is generated, as vanilla does it. A world
 /// generator started again while the game runs (<c>/wgen regen</c>) makes a new set and puts it in place whole, without
 /// clearing the one samples in flight are using.
 /// </para>
@@ -106,6 +107,11 @@ public sealed class SamplerGenMaps : ModSystem
     /// <summary>The lock for <see cref="LandformsGen"/>, which shares its climate noise with <see cref="ClimateGen"/>.</summary>
     public object LandformsLock => this.current.FollowsGame[(int)Layer.Landforms] ? this.gameClimateNoiseLock : this.ownClimateNoiseLock;
 
+    /// <summary>Vanilla's rock strata for any column, or null when there are none (<see cref="NoRocksReason"/> says why).</summary>
+    public RockStrataSampler? Rocks { get; private set; }
+
+    public string NoRocksReason { get; private set; } = "the world generator has not started";
+
     /// <summary>Whether this world's generators are there, so that sampling can give real answers.</summary>
     public bool IsReady => this.current.Chosen.All(layer => layer != null);
 
@@ -162,6 +168,24 @@ public sealed class SamplerGenMaps : ModSystem
         }
 
         this.current = set;
+
+        RockStrataSampler? rocks;
+        string reason;
+        try
+        {
+            rocks = RockStrataSampler.TryCreate(api, out reason);
+        }
+        catch (Exception ex)
+        {
+            rocks = null;
+            reason = ex.Message;
+            api.Logger.Warning("AlgernonsTerrainSampler: no top rock in column samples, the rock strata could not be read: {0}", ex);
+        }
+
+        this.Rocks = rocks;
+        this.NoRocksReason = reason;
+        if (rocks == null)
+            api.Logger.Notification("AlgernonsTerrainSampler: no top rock in column samples: {0}", reason);
     }
 
     /// <summary>
@@ -372,6 +396,7 @@ public sealed class SamplerGenMaps : ModSystem
     public override void Dispose()
     {
         this.current = GeneratorSet.None;
+        this.Rocks = null;
         this.api = null;
         base.Dispose();
     }

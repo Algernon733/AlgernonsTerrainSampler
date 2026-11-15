@@ -39,6 +39,15 @@ public sealed class TerrainTile
     /// <summary>Shrub density, 0 to 65535: <see cref="TerrainColumnSample.ShrubDensity"/> times 65535.</summary>
     public readonly ushort[] Shrub;
 
+    /// <summary>The top rock, as <see cref="TerrainColumnSample.TopRock"/>: an index into <see cref="RockCodes"/>, 0 for not known.</summary>
+    public readonly byte[] Rock;
+
+    /// <summary>
+    /// The block codes <see cref="Rock"/> indexes, the tile's own palette: entry 0 is the empty code, not known. At most
+    /// 256; a code past that is recorded as not known.
+    /// </summary>
+    public string[] RockCodes = [""];
+
     public TerrainTile(TerrainTileKey key)
     {
         this.Step = key.Step;
@@ -51,6 +60,7 @@ public sealed class TerrainTile
         this.Rainfall = new byte[TerrainTileKey.ColumnCount];
         this.Forest = new ushort[TerrainTileKey.ColumnCount];
         this.Shrub = new ushort[TerrainTileKey.ColumnCount];
+        this.Rock = new byte[TerrainTileKey.ColumnCount];
     }
 
     public TerrainTileKey Key => new(this.Step, this.TileX, this.TileZ);
@@ -68,8 +78,12 @@ public sealed class TerrainTile
         Rainfall = this.Rainfall[index] / 255f,
         Temperature = this.ClimateR[index] / 255f,
         ForestDensity = this.Forest[index] / 65535f,
-        ShrubDensity = this.Shrub[index] / 65535f
+        ShrubDensity = this.Shrub[index] / 65535f,
+        TopRock = this.Rock[index] < this.RockCodes.Length ? this.RockCodes[this.Rock[index]] : ""
     };
+
+    /// <summary>The block code of the top rock at <paramref name="index"/>, or empty for not known.</summary>
+    public string TopRock(int index) => this.Rock[index] < this.RockCodes.Length ? this.RockCodes[this.Rock[index]] : "";
 
     internal void Set(int index, TerrainColumnSample sample)
     {
@@ -80,6 +94,26 @@ public sealed class TerrainTile
         this.Rainfall[index] = Quantise8(sample.Rainfall);
         this.Forest[index] = Quantise16(sample.ForestDensity);
         this.Shrub[index] = Quantise16(sample.ShrubDensity);
+        this.Rock[index] = this.RockIndex(sample.TopRock);
+    }
+
+    // A tile holds a handful of rocks, so a linear search beats a dictionary.
+    private byte RockIndex(string code)
+    {
+        if (string.IsNullOrEmpty(code))
+            return 0;
+
+        for (int i = 1; i < this.RockCodes.Length; i++)
+        {
+            if (this.RockCodes[i] == code)
+                return (byte)i;
+        }
+
+        if (this.RockCodes.Length > byte.MaxValue)
+            return 0;
+
+        this.RockCodes = [.. this.RockCodes, code];
+        return (byte)(this.RockCodes.Length - 1);
     }
 
     private static byte Quantise8(float value) => (byte)Math.Round(Math.Clamp(float.IsFinite(value) ? value : 0f, 0f, 1f) * 255f);

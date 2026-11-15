@@ -9,6 +9,7 @@ using Vintagestory.API.Config;
 using Vintagestory.API.Datastructures;
 using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
+using Vintagestory.ServerMods.NoObf;
 
 namespace AlgernonsTerrainSampler.Tiles;
 
@@ -20,6 +21,9 @@ internal static class TerrainTileWorldIdentity
         string samplerVersion = api.ModLoader.GetMod("algernonsterrainsampler")?.Info?.Version ?? "unknown";
         string watershedsVersion = mod.WatershedsLoaded ? api.ModLoader.GetMod("watersheds")?.Info?.Version ?? "unknown" : "";
         byte[] landforms = Asset(api, "worldgen/landforms.json");
+        byte[] rockStrata = Asset(api, "worldgen/rockstrata.json");
+        byte[] provinces = Asset(api, "worldgen/geologicprovinces.json");
+        string defaultRock = DefaultRock(api);
         string generators = api.ModLoader.GetModSystem<GenMapsSubstitutions.SamplerGenMaps>()?.Fingerprint() ?? "";
 
         // The running game's version, read at run time: GameVersion's constants would be the version this was built with.
@@ -45,6 +49,11 @@ internal static class TerrainTileWorldIdentity
             WriteAttribute(writer, api.World.Config);
             writer.Write(landforms.Length);
             writer.Write(landforms);
+            writer.Write(rockStrata.Length);
+            writer.Write(rockStrata);
+            writer.Write(provinces.Length);
+            writer.Write(provinces);
+            writer.Write(defaultRock);
             writer.Write(generators);
             WriteTerraGenConfig(writer);
             writer.Write(mod.WatershedsLoaded);
@@ -60,6 +69,12 @@ internal static class TerrainTileWorldIdentity
 
     // The asset as mods have patched it.
     private static byte[] Asset(ICoreServerAPI api, string path) => api.Assets.TryGet(new AssetLocation("game", path))?.Data ?? [];
+
+    private static string DefaultRock(ICoreServerAPI api)
+    {
+        int id = GlobalConfig.GetInstance(api)?.defaultRockId ?? 0;
+        return id > 0 && id < api.World.Blocks.Count ? api.World.Blocks[id]?.Code?.ToString() ?? "" : "";
+    }
 
     // The tree in key order, so the same configuration always hashes the same.
     private static void WriteAttribute(BinaryWriter writer, IAttribute attribute)

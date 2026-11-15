@@ -74,5 +74,6 @@ internal static class TerrainTileIdentity
         writer.Write(sample.Temperature);
         writer.Write(sample.ForestDensity);
         writer.Write(sample.ShrubDensity);
+        writer.Write(sample.TopRock);
     }
 }
