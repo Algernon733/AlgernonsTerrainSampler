@@ -33,9 +33,9 @@
   <PropertyGroup>
     <ModName>Algernons Terrain Sampler</ModName>
     <GameVersion>1.22.0</GameVersion>
-    <ModVersion>1.3.0</ModVersion>
+    <ModVersion>2.0.0</ModVersion>
     <ModId>algernonsterrainsampler</ModId>
-    <Description>Provides terrain height and worldgen map-data sampling at any world coordinate without full chunk generation.</Description>
+    <Description>Provides terrain height, worldgen map-data and top rock sampling at any world coordinate without full chunk generation, and serves it to clients as cached tiles.</Description>
     <Side>Universal</Side>
     <RequiredOnClient>true</RequiredOnClient>
     <RequiredOnServer>true</RequiredOnServer>
@@ -93,6 +93,14 @@
       <HintPath>$(GameDirectory)/Lib/Newtonsoft.Json.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="protobuf-net">
+      <HintPath>$(GameDirectory)/Lib/protobuf-net.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AlgernonsTerrainSampler.Tests" />
   </ItemGroup>
 
   <!-- Creates/updates modinfo.json file in build directory -->

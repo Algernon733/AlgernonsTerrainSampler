@@ -1,6 +1,8 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using AlgernonsTerrainSampler.GenMapsSubstitutions;
 using Vintagestory.API.Common;
 using Vintagestory.API.Server;
 using Vintagestory.ServerMods;
@@ -13,10 +15,25 @@ public class TerrainSamplerMod : ModSystem
 
     public TerrainSamplerGenTerra GenTerra { get; private set; }
 
+    /// <summary>Vanilla's rock strata for any column, or null when there are none for this world (the server log says why).</summary>
+    public RockStrataSampler Rocks => this.genMaps?.Rocks;
+
     public bool WatershedsLoaded { get; private set; }
 
+    /// <summary>Whether Watersheds' detailed column sampler was found and is still in use.</summary>
+    public bool WatershedsDetailedSampling => this.WatershedsLoaded && this.watershedsSampleColumnMethod != null && this.watershedsSampler != null;
+
+    // What the sampler delegated to when the world started. The strict path refuses to answer once either has turned
+    // itself off after an error, so a tile cache never mixes Watersheds' heights with the sampler's own.
+    private bool watershedsAtStart;
+    private bool watershedsDetailedAtStart;
+
     private ICoreServerAPI serverAPI;
+    private SamplerGenMaps genMaps;
     private bool disposed;
+
+    // Top rock failures logged so far: the first with its stack trace, then a count now and then, never one per sample.
+    private int rockFailures;
     private MethodInfo watershedsGetHeightMethod;
     private MethodInfo watershedsSampleColumnMethod;
     private object watershedsGenTerraInstance;
@@ -32,10 +49,17 @@ public class TerrainSamplerMod : ModSystem
         this.serverAPI = api;
 
         api.Event.ServerRunPhase(EnumServerRunPhase.WorldReady, this.OnWorldReady);
+
+        // The game runs WorldReady before its world generators start, then starts them, then RunGame, then its chunk
+        // threads. This system's RunGame comes before the tile service's (its ExecuteOrder is lower).
+        api.Event.ServerRunPhase(EnumServerRunPhase.RunGame, this.OnRunGame);
     }
 
     private void OnWorldReady()
     {
+        // Its map generators, made when the world generator starts (after this) and settled when the game runs.
+        this.genMaps = this.serverAPI.ModLoader.GetModSystem<SamplerGenMaps>();
+
         this.GenTerra = this.serverAPI.ModLoader.GetModSystem<TerrainSamplerGenTerra>();
 
         GenMaps basegameGenMaps = this.serverAPI.ModLoader.GetModSystem<GenMaps>();
@@ -44,6 +68,9 @@ public class TerrainSamplerMod : ModSystem
 
         if (this.serverAPI.ModLoader.Mods.Any(m => m.Info?.ModID == "watersheds"))
             this.TryReflectWatersheds();
+
+        this.watershedsAtStart = this.WatershedsLoaded;
+        this.watershedsDetailedAtStart = this.WatershedsDetailedSampling;
 
         TerrainSamplerCommand command = new(this);
         _ = this.serverAPI.ChatCommands
@@ -60,6 +87,29 @@ public class TerrainSamplerMod : ModSystem
                 .RequiresPrivilege(Privilege.chat)
                 .HandleWith(command.CmdSampleColumn)
             .EndSubCommand()
+            .BeginSubCommand("rockcheck")
+                .WithDescription("Compare the sampled top rock with the generated chunks round you (radius in chunks, default 4, at most 8)")
+                .RequiresPrivilege(Privilege.controlserver)
+                .WithArgs(this.serverAPI.ChatCommands.Parsers.OptionalInt("radius", 4))
+                .HandleWith(command.CmdRockCheck)
+            .EndSubCommand()
+            .BeginSubCommand("mapcheck")
+                .WithDescription("Compare the sampler's own climate, upheaval, ocean, landform, forest and shrub maps with the world's for the generated map regions round you (radius in regions, default 1, at most 4)")
+                .RequiresPrivilege(Privilege.controlserver)
+                .WithArgs(this.serverAPI.ChatCommands.Parsers.OptionalInt("radius", 1))
+                .HandleWith(command.CmdMapCheck)
+            .EndSubCommand()
+            .BeginSubCommand("tiles")
+                .WithDescription("Show the terrain tile service's state: its cache, its queue and its clients")
+                .RequiresPrivilege(Privilege.controlserver)
+                .HandleWith(_ => TextCommandResult.Success(Tiles.TerrainTileSystem.ServerInstance?.Describe() ?? "The terrain tile service is not loaded."))
+            .EndSubCommand()
+            .BeginSubCommand("tilefetch")
+                .WithDescription("Make the square of terrain tiles round you (or spawn), and report how long they took: a manual prewarm. The radius is capped so the square fits MaxWantedTiles")
+                .RequiresPrivilege(Privilege.controlserver)
+                .WithArgs(this.serverAPI.ChatCommands.Parsers.OptionalInt("step", 4), this.serverAPI.ChatCommands.Parsers.OptionalInt("radius", 1))
+                .HandleWith(args => Tiles.TerrainTileSystem.ServerInstance?.ServerFetch(args) ?? TextCommandResult.Error("The terrain tile service is not loaded."))
+            .EndSubCommand()
 #if DEBUG
             .BeginSubCommand("columninfo")
                 .WithDescription("Get debug information about the terrain generation that went into generating the block column at your current position")
@@ -68,6 +118,18 @@ public class TerrainSamplerMod : ModSystem
             .EndSubCommand()
 #endif
             ;
+    }
+
+    // Every mod's world generator has started, and the game's chunk threads have not: the generators are settled here,
+    // once, before the tile service starts sampling (SamplerGenMaps).
+    private void OnRunGame()
+    {
+        if (this.genMaps == null)
+            return;
+
+        this.genMaps.Settle();
+        if (this.genMaps.IsReady)
+            this.serverAPI.Logger.Notification("AlgernonsTerrainSampler: {0}", this.genMaps.Describe());
     }
 
     /// <summary>
@@ -118,6 +180,8 @@ public class TerrainSamplerMod : ModSystem
     /// <summary>
     /// Samples terrain height and worldgen map data at the specified world coordinate.
     /// If Watersheds is loaded, we delegate to watersheds' sampler.
+    /// <see cref="TerrainColumnSample.TopRock"/> is left empty, as it was before 2.0.0; <see cref="SampleColumnWithTopRock(int, int)"/>
+    /// adds it, at the cost of the rock strata.
     /// </summary>
     public TerrainColumnSample SampleColumn(int worldX, int worldZ)
         => this.SampleColumn(new WorldMapCoordinate(worldX, worldZ));
@@ -128,49 +192,10 @@ public class TerrainSamplerMod : ModSystem
         if (this.GenTerra == null)
             return new TerrainColumnSample { Height = TerraGenConfig.seaLevel };
 
-        if (this.WatershedsLoaded && this.watershedsSampleColumnMethod != null
-            && this.watershedsGenTerraInstance != null && this.watershedsSampler != null)
-        {
-            try
-            {
-                Type watershedsCoordinateType = this.watershedsSampleColumnMethod.GetParameters()[0].ParameterType;
-                object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
-                object sampleResult = this.watershedsSampleColumnMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
-                return this.watershedsSampler.ReadSample(sampleResult);
-            }
-            catch (Exception ex)
-            {
-                this.watershedsSampleColumnMethod = null;
-                this.watershedsSampler = null;
+        if (this.TrySampleWatershedsColumn(worldCoordinate, rethrow: false, out TerrainColumnSample watershedsSample))
+            return watershedsSample;
 
-                this.serverAPI.Logger.Warning(
-                    "AlgernonsTerrainSampler: Watersheds' detailed sampler threw an exception. Falling back to just the height sampler. " +
-                    "You wont get climate, rainfall, forest opacity etc. {0}",
-                    ex);
-            }
-        }
-
-        int? heightOverride = null;
-        if (this.WatershedsLoaded && this.watershedsGetHeightMethod != null && this.watershedsGenTerraInstance != null)
-        {
-            try
-            {
-                Type watershedsCoordinateType = this.watershedsGetHeightMethod.GetParameters()[0].ParameterType;
-                object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
-                object result = this.watershedsGetHeightMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
-                heightOverride = (int)result;
-            }
-            catch (Exception ex)
-            {
-                // Disable to avoid log spam
-                this.WatershedsLoaded = false;
-
-                this.serverAPI.Logger.Warning(
-                    "AlgernonsTerrainSampler: Watershed's height sampler threw an exception. Falling back to use the normal sampler. " +
-                    "Your terrain samples may be inconsistent with the actual terrain. {0}",
-                    ex);
-            }
-        }
+        int? heightOverride = this.SampleWatershedsHeight(worldCoordinate, rethrow: false);
 
         try
         {
@@ -179,6 +204,118 @@ public class TerrainSamplerMod : ModSystem
         catch (Exception)
         {
             return new TerrainColumnSample { Height = heightOverride ?? TerraGenConfig.seaLevel };
+        }
+    }
+
+    /// <summary>
+    /// <see cref="SampleColumn(int, int)"/> with <see cref="TerrainColumnSample.TopRock"/>: the rock at the top of the
+    /// column, from vanilla's rock strata. Empty where the world has none the sampler knows, or the rock could not be
+    /// worked out.
+    /// </summary>
+    public TerrainColumnSample SampleColumnWithTopRock(int worldX, int worldZ)
+        => this.SampleColumnWithTopRock(new WorldMapCoordinate(worldX, worldZ));
+
+    /// <inheritdoc cref="SampleColumnWithTopRock(int, int)"/>
+    public TerrainColumnSample SampleColumnWithTopRock(WorldMapCoordinate worldCoordinate)
+        => this.WithRock(this.SampleColumn(worldCoordinate), worldCoordinate, rethrow: false);
+
+    /// <summary>
+    /// The rock at the top of the column, as <see cref="TerrainColumnSample.TopRock"/> has it, for a column of terrain
+    /// height <paramref name="height"/>; empty when the world's strata are not vanilla's.
+    /// </summary>
+    public string GetTopRock(int worldX, int worldZ, int height)
+        => this.Rocks?.TopRock(worldX, worldZ, height) ?? "";
+
+    private TerrainColumnSample WithRock(TerrainColumnSample sample, WorldMapCoordinate worldCoordinate, bool rethrow)
+    {
+        RockStrataSampler rocks = this.Rocks;
+        if (rocks == null)
+            return sample;
+
+        try
+        {
+            return sample with { TopRock = rocks.TopRock(worldCoordinate.X, worldCoordinate.Z, sample.Height) };
+        }
+        catch (Exception ex) when (!rethrow)
+        {
+            int failures = Interlocked.Increment(ref this.rockFailures);
+            if (failures == 1)
+                this.serverAPI?.Logger.Warning("AlgernonsTerrainSampler: the top rock could not be worked out at {0}; further failures are counted, not logged: {1}", worldCoordinate, ex);
+            else if (failures % 10000 == 0)
+                this.serverAPI?.Logger.Warning("AlgernonsTerrainSampler: the top rock could not be worked out {0} times, the last at {1}: {2}", failures, worldCoordinate, ex.Message);
+
+            return sample;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="SampleColumnWithTopRock(WorldMapCoordinate)"/> without its fallbacks: a failure throws rather than
+    /// answering sea level or no rock, and so does a Watersheds delegation that has turned itself off since the world
+    /// started. Anything that keeps samples, such as the tile cache, must use this, or one bad moment becomes flat ground
+    /// for good.
+    /// </summary>
+    internal TerrainColumnSample SampleColumnOrThrow(WorldMapCoordinate worldCoordinate)
+    {
+        TerrainSamplerGenTerra genTerra = this.GenTerra ?? throw new InvalidOperationException("The terrain sampler has not started.");
+        if (this.WatershedsLoaded != this.watershedsAtStart || this.WatershedsDetailedSampling != this.watershedsDetailedAtStart)
+            throw new InvalidOperationException("Watersheds delegation changed after an error; restart the server to sample again.");
+
+        if (this.TrySampleWatershedsColumn(worldCoordinate, rethrow: true, out TerrainColumnSample watershedsSample))
+            return this.WithRock(watershedsSample, worldCoordinate, rethrow: true);
+
+        return this.WithRock(genTerra.SampleColumn(worldCoordinate, this.SampleWatershedsHeight(worldCoordinate, rethrow: true)), worldCoordinate, rethrow: true);
+    }
+
+    private bool TrySampleWatershedsColumn(WorldMapCoordinate worldCoordinate, bool rethrow, out TerrainColumnSample sample)
+    {
+        sample = default;
+        if (!this.WatershedsLoaded || this.watershedsSampleColumnMethod == null
+            || this.watershedsGenTerraInstance == null || this.watershedsSampler == null)
+            return false;
+
+        try
+        {
+            Type watershedsCoordinateType = this.watershedsSampleColumnMethod.GetParameters()[0].ParameterType;
+            object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
+            object sampleResult = this.watershedsSampleColumnMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
+            sample = this.watershedsSampler.ReadSample(sampleResult);
+            return true;
+        }
+        catch (Exception ex) when (!rethrow)
+        {
+            this.watershedsSampleColumnMethod = null;
+            this.watershedsSampler = null;
+
+            this.serverAPI.Logger.Warning(
+                "AlgernonsTerrainSampler: Watersheds' detailed sampler threw an exception. Falling back to just the height sampler. " +
+                "You wont get climate, rainfall, forest opacity etc. {0}",
+                ex);
+            return false;
+        }
+    }
+
+    private int? SampleWatershedsHeight(WorldMapCoordinate worldCoordinate, bool rethrow)
+    {
+        if (!this.WatershedsLoaded || this.watershedsGetHeightMethod == null || this.watershedsGenTerraInstance == null)
+            return null;
+
+        try
+        {
+            Type watershedsCoordinateType = this.watershedsGetHeightMethod.GetParameters()[0].ParameterType;
+            object watershedsCoordinate = Activator.CreateInstance(watershedsCoordinateType, worldCoordinate.X, worldCoordinate.Z);
+            object result = this.watershedsGetHeightMethod.Invoke(this.watershedsGenTerraInstance, [watershedsCoordinate]);
+            return (int)result;
+        }
+        catch (Exception ex) when (!rethrow)
+        {
+            // Disable to avoid log spam
+            this.WatershedsLoaded = false;
+
+            this.serverAPI.Logger.Warning(
+                "AlgernonsTerrainSampler: Watershed's height sampler threw an exception. Falling back to use the normal sampler. " +
+                "Your terrain samples may be inconsistent with the actual terrain. {0}",
+                ex);
+            return null;
         }
     }
 
@@ -234,6 +371,7 @@ public class TerrainSamplerMod : ModSystem
         Instance = null;
         this.serverAPI = null;
         this.GenTerra = null;
+        this.genMaps = null;
         this.watershedsGetHeightMethod = null;
         this.watershedsSampleColumnMethod = null;
         this.watershedsGenTerraInstance = null;

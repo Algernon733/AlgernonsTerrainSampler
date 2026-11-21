@@ -72,7 +72,8 @@ public static class Mapping
             int padding,
             int mapScale,
             MapLayerBase mapGen,
-            string mapType)
+            string mapType,
+            object generatorLock = null)
         {
             if (mapGen == null)
                 throw new ArgumentNullException(nameof(mapGen), $"Map generator for '{mapType}' is null.");
@@ -91,7 +92,7 @@ public static class Mapping
                     if (MasterCache.TryGetValue(masterKey, out masterMap))
                         return masterMap;
 
-                    masterMap = GenerateNewMap(regionCoordinate, regionSize, padding, mapScale, mapGen);
+                    masterMap = GenerateNewMap(regionCoordinate, regionSize, padding, mapScale, mapGen, generatorLock);
 
                     _ = MasterCache.Set(masterKey, masterMap, new MemoryCacheEntryOptions
                     {
@@ -105,7 +106,7 @@ public static class Mapping
             catch (ObjectDisposedException)
             {
                 // Cache was disposed during shutdown so regenerate it.
-                return GenerateNewMap(regionCoordinate, regionSize, padding, mapScale, mapGen);
+                return GenerateNewMap(regionCoordinate, regionSize, padding, mapScale, mapGen, generatorLock);
             }
         }
 
@@ -114,12 +115,15 @@ public static class Mapping
             int regionSize,
             int padding,
             int mapScale,
-            MapLayerBase mapGen)
+            MapLayerBase mapGen,
+            object generatorLock)
         {
             IntDataMap2D map = new();
             int noiseSize = regionSize / mapScale;
 
-            lock (mapGen)
+            // A map layer keeps state while it generates, so one thread at a time; generators that share state (the
+            // climate and landform layers share a climate noise) share a lock.
+            lock (generatorLock ?? mapGen)
             {
                 map.Data = mapGen.GenLayer(
                     (regionCoordinate.X * noiseSize) - padding,
@@ -141,5 +145,48 @@ public static class Mapping
                 _MasterCache.Value.Dispose();
             _MasterCache = NewMasterCache();
         }
+    }
+
+    /// <summary>
+    /// Something made once for each map region, kept for the regions used most recently: past
+    /// <c>regionsKept</c> the least recently used are dropped, so sampling far and wide (as the tile service does for
+    /// its clients) holds a bounded amount of memory. Thread safe; a region's value is made once at a time.
+    /// </summary>
+    public sealed class RegionCache<T> : IDisposable where T : class
+    {
+        private const int LockStripeCount = 64;
+
+        private readonly MemoryCache cache;
+        private readonly object[] locks = [.. Enumerable.Range(0, LockStripeCount).Select(_ => new object())];
+
+        public RegionCache(int regionsKept)
+        {
+            this.cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = regionsKept, CompactionPercentage = 0.10 });
+        }
+
+        public T GetOrAdd(int regionX, int regionZ, Func<T> make)
+        {
+            object key = (regionX, regionZ);
+            if (this.cache.TryGetValue(key, out T value))
+                return value;
+
+            lock (this.locks[(key.GetHashCode() & int.MaxValue) % LockStripeCount])
+            {
+                if (this.cache.TryGetValue(key, out value))
+                    return value;
+
+                value = make();
+                _ = this.cache.Set(key, value, new MemoryCacheEntryOptions { Size = 1 });
+                return value;
+            }
+        }
+
+        /// <summary>Regions held now.</summary>
+        public int Count => this.cache.Count;
+
+        /// <summary>Drops every region.</summary>
+        public void Clear() => this.cache.Compact(1.0);
+
+        public void Dispose() => this.cache.Dispose();
     }
 }
