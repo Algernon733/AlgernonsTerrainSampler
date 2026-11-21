@@ -104,7 +104,7 @@ recently used first), where they used to grow with every region ever sampled unt
 
 Each tile is made once and kept in memory (64 MiB by default) and on disk (1 GiB for every world together), under
 `ModData/algernonsterrainsampler/worlds/<savegame>/<identity>/`. The identity is a SHA-256 of everything that decides
-what the sampler answers: the sampler's version and an algorithm revision, the game's version, the seed, the map and
+what the sampler answers: the sampler's version and an algorithm revision, the game's version, the world's seed, the map and
 region sizes, the sea level, the whole world configuration, the patched `worldgen/landforms.json`,
 `worldgen/rockstrata.json` and `worldgen/geologicprovinces.json`, the default rock, every public setting of
 `TerraGenConfig`, the Watersheds handoff, an admin revision number, and a canary of 64 columns sampled at start, their
@@ -263,6 +263,12 @@ variance allows it), reading the tile's public fields through cached `FieldInfo`
   and `TerrainGenerationLib.GetOrLoadLerpedLandformMap` takes it.
 - Landforms are now loaded at every world start, not once per process: they depend on the world height and on mods
   patching the asset, so a second world in the same run used to sample with the first world's.
+- Game 1.23 generates terrain from `SeedWorldgen`, which only the server has; a world's `Seed` is then a separate
+  random number (a world from an earlier game takes its old seed into `SeedWorldgen` when 1.23 first loads it, and is
+  given a new `Seed`). Everything the sampler seeds (the terrain noise, the map layers, the rock strata) reads the seed
+  through `WorldgenSeed`: `SeedWorldgen` where the running game has it, `Seed` before. One build serves 1.22 and 1.23.
+  1.3.0 reads `Seed` and so samples another world's terrain on 1.23, without an error. The cache identity keeps
+  `Seed`, since it goes to every client.
 
 ## Measured
 

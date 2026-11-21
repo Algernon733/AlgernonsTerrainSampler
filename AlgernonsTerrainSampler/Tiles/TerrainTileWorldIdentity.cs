@@ -40,6 +40,9 @@ internal static class TerrainTileWorldIdentity
             writer.Write(samplerVersion);
             writer.Write(gameVersion);
             writer.Write(api.World.SavegameIdentifier ?? "");
+            // The world's seed, never WorldgenSeed: this identity goes to every client, and from game 1.23 the terrain's
+            // seed is the server's secret, which a hash of it beside otherwise public inputs would give up to a search of
+            // 2^32. The canary columns below change the identity whenever the terrain does.
             writer.Write(world.Seed);
             writer.Write(world.MapSizeX);
             writer.Write(world.MapSizeY);

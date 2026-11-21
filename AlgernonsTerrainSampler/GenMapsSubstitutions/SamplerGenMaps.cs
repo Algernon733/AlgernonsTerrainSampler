@@ -207,7 +207,7 @@ public sealed class SamplerGenMaps : ModSystem
     private MapLayerBase?[] MakeCopies(ICoreServerAPI api, GenMaps gameMaps)
     {
         MapLayerBase?[] own = new MapLayerBase?[Layers.Length];
-        long seed = api.WorldManager.Seed;
+        long seed = WorldgenSeed.Of(api.WorldManager);
         ITreeAttribute config = api.WorldManager.SaveGame.WorldConfiguration;
         float landcover = StringUtil.ToFloat(config.GetString("landcover", "1"), 1f);
         float oceanScaleMul = StringUtil.ToFloat(config.GetString("oceanscale", "1"), 1f);

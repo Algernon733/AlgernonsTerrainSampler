@@ -62,6 +62,7 @@ public sealed class RockStrataSampler
             this.regionLocks[i] = new object();
 
         int mapSizeY = api.WorldManager.MapSizeY;
+        int seed = WorldgenSeed.Of(api.WorldManager);
         this.shapes = new RockStratumShape[strata.Variants.Length];
         this.codes = new string[strata.Variants.Length];
         this.strataNoises = new MapLayerCustomPerlin[strata.Variants.Length];
@@ -86,11 +87,11 @@ public sealed class RockStrataSampler
                 thresholds[k] *= mapSizeY;
             }
 
-            this.strataNoises[i] = new MapLayerCustomPerlin(api.World.Seed + 23423 + i, amplitudes, frequencies, thresholds);
+            this.strataNoises[i] = new MapLayerCustomPerlin(seed + 23423 + i, amplitudes, frequencies, thresholds);
         }
 
         this.defaultCode = CodeOf(api, defaultRockId);
-        this.provinceGen = GenMaps.GetGeologicProvinceMapGen(api.WorldManager.Seed + 3, api);
+        this.provinceGen = GenMaps.GetGeologicProvinceMapGen(seed + 3, api);
         this.provinces = NoiseGeoProvince.provinces;
         this.distortX = new SimplexNoise([14.0, 9.0, 6.0, 3.0], [0.01, 0.02, 0.04, 0.08], api.World.SeaLevel + 9876);
         this.distortZ = new SimplexNoise([14.0, 9.0, 6.0, 3.0], [0.01, 0.02, 0.04, 0.08], api.World.SeaLevel + 9877);

@@ -94,13 +94,15 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
         this.NoiseScale = Math.Max(1, this.api.WorldManager.MapSizeY / 256f);
         this.NumberOfOctaves = TerraGenConfig.GetTerrainOctaveCount(this.api.WorldManager.MapSizeY);
 
+        int seed = WorldgenSeed.Of(this.api.WorldManager);
+
         this.TerrainNoise = TerrainSamplerNormalizedSimplexFractalNoise.FromDefaultOctaves(
-            this.NumberOfOctaves, 0.0005 * NewSimplexNoiseLayer.OldToNewFrequency / this.NoiseScale, 0.9, this.api.WorldManager.Seed);
+            this.NumberOfOctaves, 0.0005 * NewSimplexNoiseLayer.OldToNewFrequency / this.NoiseScale, 0.9, seed);
 
         SimplexNoise DistortionNoise(long seedOffset) => new(
             amplitudes:  [55, 40, 30, 10],
             frequencies: ScaleAdjustedFrequencies([1/5.0, 1/2.50, 1/1.250, 1/0.65], this.NoiseScale),
-            seed: this.api.World.Seed + 9876 + seedOffset);
+            seed: seed + 9876 + seedOffset);
 
         this.Distort2dOnAxisX = DistortionNoise(0);
         this.Distort2dOnAxisZ = DistortionNoise(2);
@@ -108,7 +110,7 @@ public class TerrainSamplerGenTerra : ModStdWorldGen
         this.GeoUpheavalNoise = new NormalizedSimplexNoise(
             [55, 40, 30, 15, 7, 4],
             ScaleAdjustedFrequencies([1.0/5.5, 1.1/2.75, 1.2/1.375, 1.2/0.715, 1.2/0.45, 1.2/0.25], this.NoiseScale),
-            this.api.World.Seed + 9876 + 1);
+            seed + 9876 + 1);
 
         this.TempDataThreadLocal = new ThreadLocal<ThreadLocalTempData>(() => new ThreadLocalTempData
         {
